@@ -1,6 +1,6 @@
 import { listCatalogProducts, listPosMenusWithButtons, searchCustomers } from "@hkharp/db";
 import { getCurrentSession } from "@/lib/session";
-import { PosRegisterClient } from "@/components/PosRegisterClient";
+import { PosClassicClient } from "@/components/PosClassicClient";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +13,7 @@ export default async function PosPage() {
   ]);
 
   return (
-    <PosRegisterClient
+    <PosClassicClient
       session={session}
       menus={menus}
       initialProducts={initialProducts ?? []}
