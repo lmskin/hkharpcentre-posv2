@@ -1,0 +1,15 @@
+{
+  "IncompleteLocks": {},
+  "Transactions": [
+    {
+      "RequestId": "req-3",
+      "BillRef": "E2E-OCTO-1795266535574",
+      "CardId": "88419204",
+      "DeviceId": "SIM-RWL-01",
+      "AmountCents": 1230,
+      "RemainingValueCents": 18770,
+      "RecoveredFrom100022": true,
+      "TransactedAt": "2026-11-21T13:08:55.6504335+00:00"
+    }
+  ]
+}

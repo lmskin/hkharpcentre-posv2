@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Next.js & Build outputs
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# .NET Hardware Bridge outputs
+apps/pos-hardware-bridge/bin/
+apps/pos-hardware-bridge/obj/
+*.user
+
+# Environment & Secrets
+.env
+.env*.local
+*.pem
+*.pfx
+
+# Databases, journals, and local dumps
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.bak
+*.sql.gz
+backups/
+
+# Testing & Logs
+coverage/
+playwright-report/
+test-results/
+npm-debug.log*

@@ -1,0 +1,25 @@
+{
+  "name": "@hkharp/domain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./money": "./src/money.ts",
+    "./rounding": "./src/rounding.ts",
+    "./bill-math": "./src/bill-math.ts",
+    "./crm-rules": "./src/crm-rules.ts",
+    "./octopus-rules": "./src/octopus-rules.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:golden": "vitest run src/golden-v47.test.ts"
+  },
+  "dependencies": {
+    "@hkharp/contracts": "*"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.9"
+  }
+}

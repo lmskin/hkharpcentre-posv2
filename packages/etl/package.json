@@ -1,0 +1,26 @@
+{
+  "name": "@hkharp/etl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./pay-method-map": "./src/pay-method-map.ts",
+    "./invoice-ar-link": "./src/invoice-ar-link.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "audit": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@hkharp/contracts": "*",
+    "@hkharp/domain": "*",
+    "@hkharp/db": "*",
+    "mysql2": "^3.14.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3",
+    "vitest": "^3.0.9"
+  }
+}

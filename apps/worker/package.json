@@ -1,0 +1,19 @@
+{
+  "name": "@hkharp/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "start": "node --env-file=../../.env ../../node_modules/tsx/dist/cli.mjs src/index.ts"
+  },
+  "dependencies": {
+    "@hkharp/contracts": "*",
+    "@hkharp/domain": "*",
+    "@hkharp/db": "*",
+    "@hkharp/etl": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3"
+  }
+}

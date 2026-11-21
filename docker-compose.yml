@@ -1,0 +1,28 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: hkharp-mysql84
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_as_ci
+      - --default-time-zone=+08:00
+      - --transaction-isolation=READ-COMMITTED
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dev_root_change_me}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-hkharp_pos}
+      MYSQL_USER: ${MYSQL_USER:-hkharp}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-dev_hkharp_change_me}
+      TZ: Asia/Hong_Kong
+    ports:
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD:-dev_root_change_me}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql_data:

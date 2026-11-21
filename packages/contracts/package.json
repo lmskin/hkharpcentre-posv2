@@ -1,0 +1,18 @@
+{
+  "name": "@hkharp/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./payment": "./src/payment.ts",
+    "./invoice": "./src/invoice.ts",
+    "./hardware-bridge": "./src/hardware-bridge.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.24.2"
+  }
+}
