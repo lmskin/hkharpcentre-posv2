@@ -45,12 +45,22 @@ schtasks /end /tn "HKHarpPOS"      :: 停止
 日志：`C:\hkharpcentre-posv2\logs\pos-server.log`
 健康检查：浏览器打开 `http://localhost:3000/api/health`，应见 `"connected":true`、`tableCount:37`。
 
-### 更新流程（git pull 后）
+### 一鍵部署（推薦）
+
+```powershell
+cd C:\hkharpcentre-posv2
+npm.cmd run deploy:prod
+```
+
+`scripts/deploy-prod.ps1` 會自動完成：清除 user 級 `DATABASE_URL` → 備份 MySQL → `db:migrate` → 停止 `HKHarpPOS` 並釋放 3000 埠 → `npm.cmd run build` → 啟動 `HKHarpPOS` → 輪詢 `/api/health` 確認 `connected: true` 及 `tableCount: 37`。
+
+### 手動更新流程（git pull 後）
 
 ```
 cd C:\hkharpcentre-posv2
 git pull
-set "DATABASE_URL="                :: 关键，见第 2 节
+set "DATABASE_URL="                :: 關鍵，見第 2 节
+set "MIGRATE_DATABASE_URL="
 npm install                        :: 依赖有变化时
 npm run db:migrate                 :: schema 有变化时
 npm run build

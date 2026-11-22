@@ -18,6 +18,8 @@ apps/pos-hardware-bridge/obj/
 # Environment & Secrets
 .env
 .env*.local
+apps/pos-hardware-bridge/appsettings.Production.json
+apps/pos-hardware-bridge/appsettings.*.local.json
 *.pem
 *.pfx
 

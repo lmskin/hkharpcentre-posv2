@@ -17,6 +17,7 @@
     "test:golden": "npm --workspace @hkharp/domain run test:golden",
     "test:e2e": "playwright test",
     "build": "npm --workspace @hkharp/web run build && npm --workspace @hkharp/worker run typecheck",
+    "deploy:prod": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-prod.ps1",
     "build:bridge": "dotnet build apps/pos-hardware-bridge/PosHardwareBridge.csproj -c Release",
     "dev": "npm --workspace @hkharp/web run dev --",
     "db:generate": "npm --workspace @hkharp/db run db:generate",

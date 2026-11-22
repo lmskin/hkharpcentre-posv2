@@ -13,6 +13,9 @@ REM the server silently connects to the wrong MySQL.
 set "DATABASE_URL="
 set "MIGRATE_DATABASE_URL="
 
+REM Clean up any orphaned listener holding TCP 3000 before entering restart loop.
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":3000[ ][ ]*.*LISTENING"') do if NOT "%%p"=="0" taskkill /F /PID %%p >nul 2>&1
+
 :loop
 echo %DATE% %TIME% starting next start >> C:\hkharpcentre-posv2\logs\pos-server.log
 "C:\Program Files\nodejs\node.exe" --env-file=../../.env ../../node_modules/next/dist/bin/next start -p 3000 >> C:\hkharpcentre-posv2\logs\pos-server.log 2>&1

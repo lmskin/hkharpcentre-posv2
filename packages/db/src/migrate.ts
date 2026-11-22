@@ -4,11 +4,22 @@ import mysql from "mysql2/promise";
 import { migrate } from "drizzle-orm/mysql2/migrator";
 import { createDb, validateDatabaseUrl } from "./client";
 
-async function main() {
-  const parsedUrl = validateDatabaseUrl(process.env.DATABASE_URL);
-  const dbName = parsedUrl.pathname.replace(/^\//, "");
+async function ensureDatabaseExists(rawUrl: string, parsedUrl: URL, dbName: string) {
+  try {
+    const checkConn = await mysql.createConnection(rawUrl);
+    try {
+      await checkConn.query("SELECT 1");
+      return;
+    } finally {
+      await checkConn.end();
+    }
+  } catch (err) {
+    const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code: unknown }).code) : "";
+    if (code !== "ER_BAD_DB_ERROR") {
+      throw err;
+    }
+  }
 
-  // Ensure target schema exists with MySQL 8 utf8mb4_0900_as_ci before applying migrations
   const adminConn = await mysql.createConnection({
     host: parsedUrl.hostname,
     port: Number(parsedUrl.port || "3306"),
@@ -24,10 +35,18 @@ async function main() {
   } finally {
     await adminConn.end();
   }
+}
+
+async function main() {
+  const rawUrl = process.env.DATABASE_URL;
+  const parsedUrl = validateDatabaseUrl(rawUrl);
+  const dbName = parsedUrl.pathname.replace(/^\//, "");
+
+  await ensureDatabaseExists(rawUrl!, parsedUrl, dbName);
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const migrationsFolder = path.resolve(__dirname, "../drizzle");
-  const { db, pool } = createDb(process.env.DATABASE_URL!);
+  const { db, pool } = createDb(rawUrl!);
 
   try {
     await migrate(db, { migrationsFolder });
