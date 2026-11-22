@@ -63,6 +63,7 @@ export const IssueBillOrInvoiceInputSchema = z.object({
   supersedeInvoiceNo: z.string().trim().min(1).max(40).optional(),
   createDeliveryOrder: z.boolean().default(false),
   businessDateOverride: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  salespersonId: z.number().int().positive().optional(),
   customerId: z.number().int().positive().optional(),
   customerCurrentPoints: z.number().int().nonnegative().default(0),
   lines: z.array(BillLineInputSchema).min(1),

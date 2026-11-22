@@ -35,6 +35,7 @@ import { PrinterSetupDialog } from "@/components/PrinterSetupDialog";
 import { HourlyReport } from "@/components/reports/HourlyReport";
 import { ItemReport } from "@/components/reports/ItemReport";
 import { HistoryReport } from "@/components/reports/HistoryReport";
+import { ManagerStatsReport } from "@/components/reports/ManagerStatsReport";
 import { SupportDialog, type SupportKind } from "@/components/SupportDialog";
 import { OfficeTxnPanel, type OfficeDocType } from "@/components/OfficeTxnPanel";
 import { formatLegacyMessage, type LegacyLanguage } from "@/lib/legacy-messages";
@@ -43,6 +44,11 @@ interface CartLine {
   item: PosProduct;
   quantity: number;
   discountRate: number;
+  overrideUnitPriceHkd?: number;
+}
+
+function getLineUnitPrice(line: CartLine): number {
+  return line.overrideUnitPriceHkd ?? line.item.unitPriceHkd;
 }
 
 interface SavedDocSummary {
@@ -143,6 +149,7 @@ export function PosClassicClient({
   const [staffQuery, setStaffQuery] = useState("");
   const [staffPage, setStaffPage] = useState(1);
   const [staffTotal, setStaffTotal] = useState(0);
+  const [selectedSalesperson, setSelectedSalesperson] = useState<PosStaff | null>(null);
   const [pickerLoading, setPickerLoading] = useState(false);
 
   // ---- legacy UI state ------------------------------------------------------
@@ -156,7 +163,7 @@ export function PosClassicClient({
   const [showStock, setShowStock] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showPrinter, setShowPrinter] = useState(false);
-  const [activeReport, setActiveReport] = useState<"hourly" | "items" | "history" | null>(null);
+  const [activeReport, setActiveReport] = useState<"hourly" | "items" | "history" | "stats" | null>(null);
   const [supportKind, setSupportKind] = useState<SupportKind | null>(null);
   const [officeTxnType, setOfficeTxnType] = useState<OfficeDocType | null>(null);
   const [showAbout, setShowAbout] = useState(false);
@@ -222,6 +229,22 @@ export function PosClassicClient({
     }
   }, [session]);
 
+  useEffect(() => {
+    const handleOnline = () => {
+      try {
+        const raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
+        const arr = raw ? (JSON.parse(raw) as unknown[]) : [];
+        if (Array.isArray(arr) && arr.length > 0) {
+          void flushOfflineOutbox();
+        }
+      } catch {
+        // ignore storage parse error
+      }
+    };
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, []);
+
   // ---- derived values -------------------------------------------------------
   const promoResult = useMemo(
     () =>
@@ -230,7 +253,7 @@ export function PosClassicClient({
           sku: c.item.sku,
           categoryC1: c.item.categoryC1,
           quantity: c.quantity,
-          unitPriceHkd: c.item.unitPriceHkd,
+          unitPriceHkd: getLineUnitPrice(c),
           discountRate: c.discountRate,
         })),
         promoRules,
@@ -242,7 +265,7 @@ export function PosClassicClient({
     cart.map((c, idx) => ({
       sku: c.item.sku,
       quantity: c.quantity,
-      unitPriceHkd: c.item.unitPriceHkd,
+      unitPriceHkd: getLineUnitPrice(c),
       discountRate: promoRules.length > 0 ? (promoResult.lines[idx]?.discountRate ?? c.discountRate) : c.discountRate,
       dk: idx + 1,
     })),
@@ -475,24 +498,58 @@ export function PosClassicClient({
     });
   }
 
-  /** 改價: override the selected line price with the keypad buffer (as discount rate). */
+  /** 改價: override the selected line unit price directly (supports $0 open-price & upward edits; blocks fixed-price SKUs). */
   function overridePrice() {
     if (!selectedLine) {
       showLegacyMsg("021");
       return;
     }
-    const target = Number(entryBuffer);
-    if (!target || target <= 0 || target > selectedLine.item.unitPriceHkd) {
+    if (selectedLine.item.isFixedPrice) {
+      showLegacyMsg("026");
+      return;
+    }
+    const raw = entryBuffer.trim();
+    const target = Number(raw);
+    if (!raw || !Number.isFinite(target) || target < 0) {
       showLegacyMsg("023");
       return;
     }
-    const rate = Math.round((1 - target / selectedLine.item.unitPriceHkd) * 10000) / 10000;
+    const rounded = Number(target.toFixed(2));
     setOctopusApprovedInfo(null);
     setCart((prev) =>
-      prev.map((c) => (c.item.sku === selectedLine.item.sku ? { ...c, discountRate: rate } : c)),
+      prev.map((c) =>
+        c.item.sku === selectedLine.item.sku
+          ? { ...c, overrideUnitPriceHkd: rounded, discountRate: 0 }
+          : c,
+      ),
     );
     setEntryBuffer("");
-    setStatusMessage(`${selectedLine.item.sku} 改價為 ${formatHkd(target)}`);
+    setStatusMessage(`${selectedLine.item.sku} 改價為 ${formatHkd(rounded)}`);
+  }
+
+  /** Legacy DiscountReason quick preset in 優惠 panel. */
+  function applyPresetDiscount(label: string, rate: number) {
+    if (cart.length === 0) {
+      showLegacyMsg("022");
+      return;
+    }
+    const eligible = cart.filter((c) => !c.item.isFixedPrice && c.item.allowItemDiscount !== false);
+    if (rate > 0 && eligible.length === 0) {
+      showLegacyMsg("026");
+      return;
+    }
+    setOctopusApprovedInfo(null);
+    setCart((prev) =>
+      prev.map((c) =>
+        c.item.isFixedPrice || c.item.allowItemDiscount === false ? c : { ...c, discountRate: rate },
+      ),
+    );
+    setNotes((cur) => {
+      const stripped = cur.replace(/\[優惠:[^\]]+\]/g, "").trim();
+      if (rate <= 0) return stripped;
+      return [stripped, `[優惠:${label}]`].filter(Boolean).join(" ").slice(0, 500);
+    });
+    setStatusMessage(rate <= 0 ? "已清除單項優惠折扣" : `已套用 ${label}（${(rate * 100).toFixed(0)}%）`);
   }
 
   /** 選價: price enquiry for the buffered code or the selected line. */
@@ -820,6 +877,7 @@ export function PosClassicClient({
       clientIdempotencyKey: `bill-${crypto.randomUUID()}`,
       shopId: storeContext?.shopId ?? session.shopId ?? 1,
       terminalId: storeContext?.terminalId,
+      salespersonId: selectedSalesperson?.id,
       docType: effectiveDocType,
       status: mode,
       supersedeInvoiceNo: editingInvoiceNo ?? undefined,
@@ -832,7 +890,7 @@ export function PosClassicClient({
         nameEn: c.item.nameEn,
         categoryC1: c.item.categoryC1,
         quantity: c.quantity,
-        unitPriceHkd: c.item.unitPriceHkd,
+        unitPriceHkd: getLineUnitPrice(c),
         discountRate: promoRules.length > 0 ? (promoResult.lines[idx]?.discountRate ?? c.discountRate) : c.discountRate,
         lineDiscountAmountHkd: 0,
         isFixedPrice: Boolean(c.item.isFixedPrice),
@@ -894,6 +952,7 @@ export function PosClassicClient({
       setDepositAmount("");
       setNotes("");
       setEditingInvoiceNo(null);
+      setSelectedSalesperson(null);
       setEntryBuffer("");
       if (mode === "held") {
         setStatusMessage(`暫停單 ${data.invoiceNo} 已儲存（於查單 [暫停單] 恢復）`);
@@ -1053,6 +1112,11 @@ export function PosClassicClient({
             會員：{selectedCustomer.nameZh || selectedCustomer.nameEn}（{selectedCustomer.pointsBalance} 分）
           </span>
         ) : null}
+        {selectedSalesperson ? (
+          <span className="border-r border-[#d4d0c8] bg-[#e8eef5] px-2 py-0.5">
+            銷售員：{selectedSalesperson.displayName}
+          </span>
+        ) : null}
         {isDelivery ? <span className="border-r border-[#d4d0c8] bg-[#fff3c4] px-2 py-0.5 font-bold">送貨</span> : null}
         {editingInvoiceNo ? <span className="px-2 py-0.5 text-[#c00000]">修改：{editingInvoiceNo}</span> : null}
         <span className="ml-auto px-2 py-0.5 font-bold">{modeLabel}</span>
@@ -1119,7 +1183,7 @@ export function PosClassicClient({
                       <td className="px-2 py-1">-</td>
                       <td className="px-2 py-1">-</td>
                       <td className="px-2 py-1 text-right font-mono">{line.quantity}</td>
-                      <td className="px-2 py-1 text-right font-mono">{formatHkd(line.item.unitPriceHkd)}</td>
+                      <td className="px-2 py-1 text-right font-mono">{formatHkd(getLineUnitPrice(line))}</td>
                       <td className="px-2 py-1 text-right font-mono">
                         {line.discountRate > 0 ? `${(line.discountRate * 100).toFixed(0)}` : ""}
                       </td>
@@ -1276,7 +1340,7 @@ export function PosClassicClient({
                 pageSize={12}
                 query={staffQuery}
                 loading={pickerLoading}
-                selectedKey={session?.staffId}
+                selectedKey={selectedSalesperson?.id ?? session?.staffId}
                 getKey={(member) => member.id}
                 columns={[
                   { header: "號碼", render: (member) => member.legacyId ?? member.id },
@@ -1285,7 +1349,13 @@ export function PosClassicClient({
                 ]}
                 onQueryChange={(query) => void runStaffSearch(query, 1)}
                 onPageChange={(page) => void runStaffSearch(staffQuery, page)}
-                onSelect={(member) => setStatusMessage(`職員：${member.displayName} · L${member.roleLevel}`)}
+                onSelect={(member) => {
+                  const deselect = selectedSalesperson?.id === member.id;
+                  setSelectedSalesperson(deselect ? null : member);
+                  setStatusMessage(
+                    deselect ? "已重設銷售職員為登入收銀員" : `銷售職員：${member.displayName} · L${member.roleLevel}`,
+                  );
+                }}
               />
             ) : null}
 
@@ -1300,6 +1370,29 @@ export function PosClassicClient({
                     {selectedCustomer
                       ? `${selectedCustomer.nameZh || selectedCustomer.nameEn}（結餘 ${selectedCustomer.pointsBalance} 分）`
                       : "未選擇"}
+                  </div>
+                  <div className="mt-2 border-t border-[#d4d0c8] pt-2">
+                    <div className="mb-1 font-bold">快速折扣原因（DiscountReason）：</div>
+                    <div className="grid grid-cols-2 gap-1">
+                      {(
+                        [
+                          ["VIP 9折 (10%)", 0.1],
+                          ["師生 85折 (15%)", 0.15],
+                          ["生日 8折 (20%)", 0.2],
+                          ["員工 7折 (30%)", 0.3],
+                          ["清除折扣 (0%)", 0],
+                        ] as Array<[string, number]>
+                      ).map(([label, rate]) => (
+                        <button
+                          key={label}
+                          type="button"
+                          onClick={() => applyPresetDiscount(label, rate)}
+                          className="border border-[#aca899] bg-[#f0f0f0] px-2 py-1 text-left text-[11px] text-black hover:bg-[#e5e1d5]"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                   {promoResult.applied.length > 0 ? (
                     <div className="mt-2 border-t border-[#d4d0c8] pt-1">
@@ -1417,6 +1510,9 @@ export function PosClassicClient({
                 </button>
                 <button type="button" className={panelBtn} onClick={() => setActiveReport("history")}>
                   歷史數據
+                </button>
+                <button type="button" className={panelBtn} onClick={() => setActiveReport("stats")}>
+                  營業統計 (會員/職員/分類)
                 </button>
               </div>
             ) : null}
@@ -1806,6 +1902,7 @@ export function PosClassicClient({
       {activeReport === "hourly" ? <HourlyReport onClose={() => setActiveReport(null)} /> : null}
       {activeReport === "items" ? <ItemReport onClose={() => setActiveReport(null)} /> : null}
       {activeReport === "history" ? <HistoryReport onClose={() => setActiveReport(null)} /> : null}
+      {activeReport === "stats" ? <ManagerStatsReport onClose={() => setActiveReport(null)} /> : null}
       {supportKind ? <SupportDialog kind={supportKind} shopId={storeContext?.legacySn ?? 1} terminalId={storeContext?.legacyMn ?? 1} onClose={() => setSupportKind(null)} /> : null}
       {showStock ? <StockPanel onClose={() => setShowStock(false)} /> : null}
       {showPassword ? <ChangePasswordDialog onClose={() => setShowPassword(false)} /> : null}

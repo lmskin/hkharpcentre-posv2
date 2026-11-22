@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { formatHkd } from "@hkharp/domain/money";
 import type { PosProduct } from "@/components/PosRegisterClient";
 
@@ -14,6 +14,7 @@ export type OfficeDocType =
   | "STOCK_ADJUSTMENT"
   | "PETTY_PAYOUT";
 interface OfficeLine { sku: string; nameZh: string; nameEn: string; categoryC1: number; quantity: number; unitPriceHkd: number; adjustmentDirection: 1 | -1 }
+interface SupplierItem { id: number; legacyId: string; nameZh: string; nameEn: string }
 const TYPES: Array<{ id: OfficeDocType; label: string; reference: string }> = [
   { id: "GOODS_RECEIPT", label: "到貨", reference: "供應商 / 來貨單號" },
   { id: "PURCHASE_RETURN", label: "退貨確認", reference: "供應商 / 退貨單號" },
@@ -29,6 +30,8 @@ const button = "border border-[#7f9db9] bg-[#f0f0f0] px-4 py-1 text-[12px] text-
 
 export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { initialType: OfficeDocType; products: PosProduct[]; onSearch: (query: string) => Promise<void>; onClose: () => void }) {
   const [docType, setDocType] = useState<OfficeDocType>(initialType);
+  const [suppliers, setSuppliers] = useState<SupplierItem[]>([]);
+  const [selectedSupplier, setSelectedSupplier] = useState("");
   const [reference, setReference] = useState("");
   const [notes, setNotes] = useState("");
   const [query, setQuery] = useState("");
@@ -38,6 +41,15 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
   const [message, setMessage] = useState("");
   const [completedNo, setCompletedNo] = useState("");
   const type = TYPES.find((item) => item.id === docType)!;
+
+  useEffect(() => {
+    fetch("/api/suppliers?limit=100")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { suppliers?: SupplierItem[] } | null) => {
+        if (Array.isArray(data?.suppliers)) setSuppliers(data.suppliers);
+      })
+      .catch(() => {});
+  }, []);
 
   function addProduct(product: PosProduct) {
     setCompletedNo("");
@@ -81,7 +93,36 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
       <div className="flex h-full flex-col border border-[#808080] bg-[#f0f0f0] shadow-[4px_4px_8px_rgba(0,0,0,0.4)]">
         <div className="border-b border-[#d4d0c8] px-2 py-1 text-[12px] font-bold text-black">其他交易 - {type.label}</div>
         <div className="flex border-b border-[#aca899]">{TYPES.map((item) => <button key={item.id} type="button" onClick={() => { setDocType(item.id); setCompletedNo(""); }} className={`border-r border-[#aca899] px-5 py-1 text-[12px] ${docType === item.id ? "bg-white font-bold text-black" : "bg-[#f0f0f0] text-black"}`}>{item.label}</button>)}</div>
-        <div className="flex items-center gap-2 border-b border-[#aca899] p-2 text-[12px] text-black"><label>{type.reference}<input value={reference} onChange={(event) => setReference(event.target.value)} className={`${input} ml-2 w-64`} /></label><label>備註<input value={notes} onChange={(event) => setNotes(event.target.value)} className={`${input} ml-2 w-64`} /></label><span className="ml-auto font-mono text-[16px]">總計 {formatHkd(total)}</span></div>
+        <div className="flex flex-wrap items-center gap-2 border-b border-[#aca899] p-2 text-[12px] text-black">
+          {docType === "GOODS_RECEIPT" || docType === "PURCHASE_RETURN" ? (
+            <label>
+              供應商
+              <select
+                aria-label="供應商"
+                value={selectedSupplier}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSelectedSupplier(val);
+                  if (val) setReference(val);
+                }}
+                className={`${input} ml-1 w-48`}
+              >
+                <option value="">-- 選擇供應商 ({suppliers.length}) --</option>
+                {suppliers.map((s) => {
+                  const label = `${s.legacyId} - ${s.nameZh || s.nameEn}`;
+                  return (
+                    <option key={s.id} value={label}>
+                      {label}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+          ) : null}
+          <label>{type.reference}<input value={reference} onChange={(event) => setReference(event.target.value)} className={`${input} ml-2 w-56`} /></label>
+          <label>備註<input value={notes} onChange={(event) => setNotes(event.target.value)} className={`${input} ml-2 w-48`} /></label>
+          <span className="ml-auto font-mono text-[16px]">總計 {formatHkd(total)}</span>
+        </div>
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_330px]">
           <div className="min-h-0 overflow-auto bg-[#dfe7f0]">
             <table className="w-full border-collapse text-[12px]"><thead className="sticky top-0"><tr className="bg-[#e8eef5] text-left text-black"><th className="px-2 py-1 font-normal">條碼</th><th className="px-2 py-1 font-normal">貨品 / 說明</th><th className="px-2 py-1 text-right font-normal">數量</th>{docType === "STOCK_ADJUSTMENT" ? <th className="px-2 py-1 font-normal">方向</th> : null}<th className="px-2 py-1 text-right font-normal">{docType === "GOODS_RECEIPT" ? "單位成本" : "單價"}</th><th className="px-2 py-1 text-right font-normal">金額</th><th className="px-2 py-1" /></tr></thead><tbody>{lines.map((line, index) => <tr key={`${line.sku}-${index}`} className={index % 2 ? "bg-[#e9eff6] text-black" : "bg-[#dfe7f0] text-black"}><td className="px-2 py-1 font-mono">{line.sku}</td><td className="px-2 py-1">{line.nameZh}</td><td className="px-1 py-0.5 text-right"><input type="number" min="0.0001" step="0.01" value={line.quantity} onChange={(event) => updateLine(index, { quantity: Number(event.target.value) })} className={`${input} w-20 text-right`} /></td>{docType === "STOCK_ADJUSTMENT" ? <td className="px-1 py-0.5"><select value={line.adjustmentDirection} onChange={(event) => updateLine(index, { adjustmentDirection: Number(event.target.value) as 1 | -1 })} className={input}><option value={1}>增加</option><option value={-1}>減少</option></select></td> : null}<td className="px-1 py-0.5 text-right"><input type="number" min="0" step="0.01" value={line.unitPriceHkd} onChange={(event) => updateLine(index, { unitPriceHkd: Number(event.target.value) })} className={`${input} w-24 text-right`} /></td><td className="px-2 py-1 text-right font-mono">{formatHkd(line.quantity * line.unitPriceHkd)}</td><td className="px-1 py-0.5"><button type="button" onClick={() => setLines((current) => current.filter((_, i) => i !== index))} className={button}>移除</button></td></tr>)}</tbody></table>

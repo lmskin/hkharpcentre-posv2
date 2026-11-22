@@ -13,6 +13,7 @@ const UpsertCustomerSchema = z.object({
   id: z.number().int().positive().optional(),
   legacyId: z.string().trim().max(32).optional(),
   gradeId: z.number().int().positive().nullable().optional(),
+  cardNo: z.string().trim().max(40).optional(),
   nameZh: z.string().trim().min(1).max(160),
   nameEn: z.string().trim().max(160).optional(),
   phone: z.string().trim().max(40).optional(),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatHkd } from "@hkharp/domain/money";
 import { ReceiptPreview, type ReceiptDetail } from "@/components/ReceiptPreview";
 
@@ -18,6 +18,7 @@ interface BillSummary {
 }
 
 type QueryTab = "today" | "held" | "office" | "unprocessed";
+type SubFilter = "all" | "last30" | "completed" | "cancelled" | "deposit";
 
 const TABS: Array<{ id: QueryTab; label: string }> = [
   { id: "today", label: "今日銷售" },
@@ -25,6 +26,20 @@ const TABS: Array<{ id: QueryTab; label: string }> = [
   { id: "office", label: "其他交易" },
   { id: "unprocessed", label: "未處理單" },
 ];
+
+const SUB_FILTERS: Array<{ id: SubFilter; label: string }> = [
+  { id: "all", label: "全部" },
+  { id: "last30", label: "最後30單" },
+  { id: "completed", label: "完成單" },
+  { id: "cancelled", label: "取消單" },
+  { id: "deposit", label: "落訂單" },
+];
+
+const CANCEL_REASONS = ["客人取消", "落錯單", "沽清", "試機", "其他"];
+
+function todayHktDate() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Hong_Kong" }).format(new Date());
+}
 
 const button = "border border-[#7f9db9] bg-[#f0f0f0] px-4 py-1 text-[12px] text-black hover:bg-[#e5e1d5] disabled:cursor-not-allowed disabled:opacity-40";
 
@@ -36,6 +51,10 @@ export function BillQueryDialog({
   onLoad: (detail: ReceiptDetail, action: "modify" | "reorder") => void;
 }) {
   const [tab, setTab] = useState<QueryTab>("today");
+  const [searchQ, setSearchQ] = useState("");
+  const [queryDate, setQueryDate] = useState(todayHktDate);
+  const [allDates, setAllDates] = useState(false);
+  const [subFilter, setSubFilter] = useState<SubFilter>("all");
   const [items, setItems] = useState<BillSummary[]>([]);
   const [selectedNo, setSelectedNo] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReceiptDetail | null>(null);
@@ -45,27 +64,37 @@ export function BillQueryDialog({
   const [voidReason, setVoidReason] = useState("查單取消");
   const [managerPin, setManagerPin] = useState("");
   const [busy, setBusy] = useState(false);
+  const listSeqRef = useRef(0);
+  const detailSeqRef = useRef(0);
 
   async function selectInvoice(invoiceNo: string) {
+    const seq = ++detailSeqRef.current;
     setSelectedNo(invoiceNo);
     setDetail(null);
     setError("");
     try {
       const res = await fetch(`/api/bills/${encodeURIComponent(invoiceNo)}`);
       const data = (await res.json()) as ReceiptDetail & { error?: string };
+      if (seq !== detailSeqRef.current) return;
       if (!res.ok) throw new Error(data.error ?? "未能讀取單據");
       setDetail(data);
     } catch (err) {
+      if (seq !== detailSeqRef.current) return;
       setError(err instanceof Error ? err.message : "未能讀取單據");
     }
   }
 
   async function loadList() {
+    const seq = ++listSeqRef.current;
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`/api/invoices?view=${tab}&limit=200`);
+      const params = new URLSearchParams({ view: tab, subFilter });
+      if (searchQ.trim()) params.set("q", searchQ.trim());
+      if (tab === "today") params.set("date", allDates ? "ALL" : queryDate);
+      const res = await fetch(`/api/invoices?${params.toString()}`);
       const data = (await res.json()) as { invoices: BillSummary[]; error?: string };
+      if (seq !== listSeqRef.current) return;
       if (!res.ok) throw new Error(data.error ?? "未能讀取查單資料");
       setItems(data.invoices);
       const next = data.invoices.find((item) => item.invoiceNo === selectedNo) ?? data.invoices[0];
@@ -75,17 +104,18 @@ export function BillQueryDialog({
         setDetail(null);
       }
     } catch (err) {
+      if (seq !== listSeqRef.current) return;
       setItems([]);
       setDetail(null);
       setError(err instanceof Error ? err.message : "未能讀取查單資料");
     } finally {
-      setLoading(false);
+      if (seq === listSeqRef.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     void loadList();
-  }, [tab]);
+  }, [tab, searchQ, queryDate, allDates, subFilter]);
 
   async function voidSelected() {
     if (!selectedNo) return;
@@ -120,7 +150,11 @@ export function BillQueryDialog({
       const res = await fetch(`/api/bills/${encodeURIComponent(selectedNo)}/delivery`, { method: "POST" });
       const data = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(data.error ?? "提貨確認失敗");
-      await loadList();
+      ++listSeqRef.current;
+      setItems((prev) =>
+        prev.map((item) => (item.invoiceNo === selectedNo ? { ...item, deliveryStatus: "delivered" } : item)),
+      );
+      await selectInvoice(selectedNo);
     } catch (err) {
       setError(err instanceof Error ? err.message : "提貨確認失敗");
     } finally {
@@ -146,6 +180,48 @@ export function BillQueryDialog({
             </button>
           ))}
           <div className="ml-auto px-2 py-1 text-black">單據 [{items.length}]</div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 border-b border-[#aca899] bg-[#f8f8f8] px-2 py-1.5 text-[12px] text-black">
+          <input
+            value={searchQ}
+            onChange={(e) => setSearchQ(e.target.value)}
+            placeholder="搜尋單號 / 會員 / 電話"
+            className="w-48 border border-[#7f9db9] bg-white px-2 py-0.5 text-[12px]"
+          />
+          {tab === "today" ? (
+            <>
+              <input
+                type="date"
+                aria-label="查單日期"
+                disabled={allDates}
+                value={queryDate}
+                onChange={(e) => setQueryDate(e.target.value)}
+                className="border border-[#7f9db9] bg-white px-2 py-0.5 text-[12px] disabled:opacity-40"
+              />
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={allDates}
+                  onChange={(e) => setAllDates(e.target.checked)}
+                />
+                全部日期
+              </label>
+            </>
+          ) : null}
+          <div className="flex flex-wrap items-center gap-1">
+            {SUB_FILTERS.map((sf) => (
+              <button
+                key={sf.id}
+                type="button"
+                onClick={() => setSubFilter(sf.id)}
+                className={`border border-[#7f9db9] px-2 py-0.5 text-[11px] ${
+                  subFilter === sf.id ? "bg-[#316ac5] font-bold text-white" : "bg-[#f0f0f0] text-black hover:bg-[#e5e1d5]"
+                }`}
+              >
+                {sf.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_380px]">
           <div className="min-w-0 overflow-auto bg-white">
@@ -202,7 +278,21 @@ export function BillQueryDialog({
           <div className="w-[430px] border border-[#808080] bg-[#f0f0f0] p-3 shadow-xl">
             <div className="text-[13px] font-bold text-[#2e7ec2]">營運通訊息 - 051</div>
             <div className="mt-2 text-[13px] text-black">確定取消單據 {selectedNo}？此動作會回沖存貨及付款。</div>
-            <label className="mt-3 block text-[12px] text-black">取消原因<input value={voidReason} onChange={(event) => setVoidReason(event.target.value)} className="mt-1 w-full border border-[#7f9db9] bg-white px-2 py-1" /></label>
+            <div className="mt-2 flex flex-wrap gap-1">
+              {CANCEL_REASONS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setVoidReason(preset)}
+                  className={`border border-[#7f9db9] px-2 py-0.5 text-[11px] ${
+                    voidReason === preset ? "bg-[#316ac5] font-bold text-white" : "bg-white text-black hover:bg-[#e5e1d5]"
+                  }`}
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+            <label className="mt-2 block text-[12px] text-black">取消原因<input value={voidReason} onChange={(event) => setVoidReason(event.target.value)} className="mt-1 w-full border border-[#7f9db9] bg-white px-2 py-1" /></label>
             <label className="mt-2 block text-[12px] text-black">經理覆核密碼 (6位收銀密碼，非 L4+ 時填寫)<input type="password" inputMode="numeric" maxLength={6} value={managerPin} onChange={(event) => setManagerPin(event.target.value.replace(/\D/g, ""))} placeholder="L4+ 免填" className="mt-1 w-full border border-[#7f9db9] bg-white px-2 py-1 font-mono" /></label>
             <div className="mt-4 flex justify-end gap-2">
               <button type="button" className={button} disabled={busy || !voidReason.trim()} onClick={() => void voidSelected()}>確定取消單</button>

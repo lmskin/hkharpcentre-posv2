@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { OfficeTxnPanel } from "@/components/OfficeTxnPanel";
 import type { PosProduct } from "@/components/PosRegisterClient";
@@ -15,6 +15,10 @@ export function OfficeTransactionClient() {
     const data = await res.json() as { items: PosProduct[] };
     setProducts(data.items);
   }
+
+  useEffect(() => {
+    void search("");
+  }, []);
 
   return (
     <div className="fixed inset-0 z-40 bg-[#f0f0f0]">

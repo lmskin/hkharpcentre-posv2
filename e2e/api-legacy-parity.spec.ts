@@ -6,6 +6,7 @@ import { test, expect, type APIRequestContext } from "@playwright/test";
 import { BridgeEventSchema } from "@hkharp/contracts";
 import type { Connection } from "mysql2/promise";
 import { captureDbSnapshot, openE2eMysqlConnection, restoreDbSnapshot, type DbSnapshot } from "./helpers/cleanup";
+import { loadRootDotEnv } from "./helpers/env";
 
 const execFileAsync = promisify(execFile);
 const BRIDGE_URL = "http://127.0.0.1:17889";
@@ -284,6 +285,12 @@ test.describe("Modules 1-12: Full-Stack API, Hardware Bridge & Legacy V47 Parity
 
     const newPinLogin = await loginApi(request, { pin: "222222" });
     expect(newPinLogin.status()).toBe(200);
+
+    // Restore 101 credentials so subsequent/filtered specs can also log in with 111111
+    const resetRes = await request.post("/api/auth/change-password", {
+      data: { oldPassword: "Cashier!New1", newPassword: "Cashier!101", newPin: "111111" },
+    });
+    expect(resetRes.status()).toBe(200);
   });
 
   test("Module 4, 5, 7: UBC lookup, Promotions/Rounding/CRM calculate, Hold->Resume, Amend, & Delivery", async ({
@@ -580,5 +587,154 @@ test.describe("Modules 1-12: Full-Stack API, Hardware Bridge & Legacy V47 Parity
       data: { reason: "Should fail on sealed date" },
     });
     expect(blockedVoid.status()).toBe(422);
+  });
+
+  test("Second-Pass Parity: Suppliers master, extended Product/Card fields, Bill Query filters, Salesperson stats, & Worker check", async ({
+    request,
+  }) => {
+    // 1. Suppliers GET (76 migrated V47 suppliers) + RBAC L1 403 vs L5 201
+    await loginApi(request, { pin: "111111" });
+    const supGet = await request.get("/api/suppliers");
+    expect(supGet.status()).toBe(200);
+    const supJson = (await supGet.json()) as { suppliers: Array<{ legacyId: string }>; total: number };
+    expect(supJson.total).toBe(76);
+
+    const supDeny = await request.post("/api/suppliers", {
+      data: { nameZh: "E2E Denied Supplier" },
+    });
+    expect(supDeny.status()).toBe(403);
+
+    await loginApi(request, { pin: "000000" });
+    const supCreate = await request.post("/api/suppliers", {
+      data: { legacyId: "E2E-SUP-99", nameZh: "E2E 測試供應商", nameEn: "E2E Supplier Co", phone: "25551234" },
+    });
+    expect(supCreate.status()).toBe(201);
+
+    // 2. Product upsert with UBC, fixedPriceHkd, allowItemDiscount, excludeFromCrmBonus
+    const prodPost = await request.post("/api/products", {
+      data: {
+        barcode: "E2E-EXT-01",
+        ubc: "E2E-UBC-88",
+        nameZh: "E2E 固定價配件",
+        nameEn: "E2E Fixed Accessory",
+        legacyC1: 1,
+        sellPriceHkd: 320,
+        fixedPriceHkd: 300,
+        allowItemDiscount: false,
+        excludeFromCrmBonus: true,
+      },
+    });
+    expect(prodPost.status()).toBe(201);
+    const exactUbc = await (await request.get("/api/products?exactCode=E2E-UBC-88")).json();
+    expect(exactUbc.item.sku).toBe("E2E-EXT-01");
+    expect(exactUbc.item.fixedPriceHkd).toBe(300);
+    expect(exactUbc.item.isFixedPrice).toBe(true);
+    expect(exactUbc.item.allowItemDiscount).toBe(false);
+    expect(exactUbc.item.excludeFromCrmBonus).toBe(true);
+
+    // 3. Customer cardNo assignment & lookup
+    const [custRows] = await conn.query("SELECT id FROM customers WHERE legacy_id='2261' LIMIT 1");
+    const custId = (custRows as Array<{ id: number }>)[0]!.id;
+    const custUpdate = await request.post("/api/customers", {
+      data: { id: custId, nameZh: "Yeung Kam Yan", cardNo: "E2E-MEMBER-888" },
+    });
+    expect(custUpdate.status()).toBe(201);
+    const custCardSearch = await (await request.get("/api/customers?q=E2E-MEMBER-888")).json();
+    expect(custCardSearch.customers.some((c: { legacyId: string; cardNo: string }) => c.legacyId === "2261" && c.cardNo === "E2E-MEMBER-888")).toBe(true);
+
+    // 4. Salesperson attribution & extended Bill Query filters + Manager stats report
+    const [staff101] = await conn.query("SELECT id FROM staff WHERE legacy_id='101' LIMIT 1");
+    const salespersonId = (staff101 as Array<{ id: number }>)[0]!.id;
+    const spBillRes = await request.post("/api/bills", {
+      data: {
+        clientIdempotencyKey: `e2e-sp-${Date.now()}`,
+        docType: "RETAIL_SALE",
+        businessDateOverride: "2099-12-30",
+        salespersonId,
+        customerId: custId,
+        lines: [{ sku: "210810", nameZh: "CD", categoryC1: 0, quantity: 1, unitPriceHkd: 113 }],
+        initialPayments: [{ clientIdempotencyKey: `e2e-spp-${Date.now()}`, tenderCode: "CASH", amountHkd: 113 }],
+        notes: "E2E-SALESPERSON-QUERY",
+      },
+    });
+    expect(spBillRes.status()).toBe(201);
+    const spBill = (await spBillRes.json()) as { invoiceNo: string };
+
+    // Deposit / Unpaid invoice for subFilter=deposit check
+    const depInvRes = await request.post("/api/bills", {
+      data: {
+        clientIdempotencyKey: `e2e-depq-${Date.now()}`,
+        docType: "SALES_INVOICE",
+        businessDateOverride: "2099-12-30",
+        lines: [{ sku: "210810", nameZh: "CD", categoryC1: 0, quantity: 2, unitPriceHkd: 113 }],
+        initialPayments: [],
+        notes: "E2E-DEPOSIT-QUERY",
+      },
+    });
+    expect(depInvRes.status()).toBe(201);
+    const depInv = (await depInvRes.json()) as { invoiceNo: string };
+
+    const qMatch = await (
+      await request.get("/api/invoices?view=today&date=2099-12-30&q=E2E-SALESPERSON-QUERY&subFilter=completed")
+    ).json();
+    expect((qMatch.invoices as Array<{ invoiceNo: string }>).some((b) => b.invoiceNo === spBill.invoiceNo)).toBe(true);
+
+    const depMatch = await (
+      await request.get("/api/invoices?view=today&date=2099-12-30&subFilter=deposit")
+    ).json();
+    expect((depMatch.invoices as Array<{ invoiceNo: string }>).some((b) => b.invoiceNo === depInv.invoiceNo)).toBe(true);
+
+    const last30Match = await (
+      await request.get("/api/invoices?view=today&date=ALL&subFilter=last30")
+    ).json();
+    expect((last30Match.invoices as unknown[]).length).toBeLessThanOrEqual(30);
+
+    // Void one and check subFilter=cancelled
+    expect(
+      (await request.post(`/api/bills/${encodeURIComponent(depInv.invoiceNo)}/void`, { data: { reason: "客人取消" } })).status(),
+    ).toBe(200);
+    const cancelMatch = await (
+      await request.get("/api/invoices?view=today&date=2099-12-30&subFilter=cancelled")
+    ).json();
+    expect((cancelMatch.invoices as Array<{ invoiceNo: string }>).some((b) => b.invoiceNo === depInv.invoiceNo)).toBe(true);
+
+    // Manager stats report on 2099-12-30
+    const statsRes = await request.get("/api/reports?view=stats&from=2099-12-30&to=2099-12-30");
+    expect(statsRes.status()).toBe(200);
+    const stats = (await statsRes.json()) as {
+      customerStats: Array<{ legacyId: string; netSpendHkd: number }>;
+      staffStats: Array<{ legacyId: string; netSalesHkd: number }>;
+      docTypeStats: Array<{ docType: string; docCount: number }>;
+    };
+    expect(stats.customerStats.some((c) => c.legacyId === "2261" && c.netSpendHkd === 113)).toBe(true);
+    expect(stats.staffStats.some((s) => s.legacyId === "101" && s.netSalesHkd === 113)).toBe(true);
+    expect(stats.docTypeStats.some((d) => d.docType === "RETAIL_SALE" && d.docCount >= 1)).toBe(true);
+
+    // 5. Worker scheduled health & check (real worker CLI execution)
+    const dotEnv = loadRootDotEnv();
+    const { stdout: workerStdout } = await execFileAsync(
+      process.execPath,
+      ["./node_modules/tsx/dist/cli.mjs", "apps/worker/src/index.ts"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          ...dotEnv,
+          DATABASE_URL: dotEnv.DATABASE_URL ?? process.env.DATABASE_URL ?? "",
+          MIGRATE_DATABASE_URL: dotEnv.MIGRATE_DATABASE_URL ?? dotEnv.DATABASE_URL ?? "",
+        },
+      },
+    );
+    const workerOut = JSON.parse(workerStdout) as {
+      service: string;
+      mysql: { connected: boolean; productCount: number };
+      scheduledTasks: unknown[];
+    };
+    const [prodCountRows] = await conn.query("SELECT COUNT(*) AS cnt FROM products");
+    const expectedProductCount = Number((prodCountRows as Array<{ cnt: number }>)[0]?.cnt ?? 0);
+    expect(workerOut.service).toBe("@hkharp/worker");
+    expect(workerOut.mysql.connected).toBe(true);
+    expect(workerOut.mysql.productCount).toBe(expectedProductCount);
+    expect(workerOut.scheduledTasks).toHaveLength(4);
   });
 });

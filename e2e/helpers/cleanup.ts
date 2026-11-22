@@ -21,6 +21,7 @@ export interface DbSnapshot {
     products: number;
     customers: number;
     memberCards: number;
+    suppliers: number;
     appSettings: number;
     billSequences: number;
   };
@@ -36,14 +37,32 @@ export interface DbSnapshot {
     email: string;
     pointsBalance: number;
   }>;
+  memberCards: Array<{
+    id: number;
+    customerId: number;
+    cardNo: string;
+    active: number;
+  }>;
+  suppliers: Array<{
+    id: number;
+    legacyId: string;
+    nameZh: string;
+    nameEn: string;
+    phone: string;
+    active: number;
+  }>;
   products: Array<{
     id: number;
+    ubc: string;
     nameZh: string;
     nameEn: string;
     legacyC1: number;
     sellPrice: string;
+    fixedPrice: string | null;
     lastPurchaseCost: string;
     avgCost: string;
+    allowItemDiscount: number;
+    excludeFromCrmBonus: number;
   }>;
   stockBalances: Array<{
     id: number;
@@ -84,6 +103,7 @@ export async function captureDbSnapshot(conn: Connection): Promise<DbSnapshot> {
     products,
     customers,
     memberCards,
+    suppliers,
     appSettings,
     billSequences,
   ] = await Promise.all([
@@ -105,6 +125,7 @@ export async function captureDbSnapshot(conn: Connection): Promise<DbSnapshot> {
     maxId(conn, "products"),
     maxId(conn, "customers"),
     maxId(conn, "member_cards"),
+    maxId(conn, "suppliers"),
     maxId(conn, "app_settings"),
     maxId(conn, "bill_sequences"),
   ]);
@@ -119,8 +140,14 @@ export async function captureDbSnapshot(conn: Connection): Promise<DbSnapshot> {
   const [custRows] = await conn.query(
     "SELECT id, grade_id, name_zh, name_en, phone, email, points_balance FROM customers",
   );
+  const [cardRows] = await conn.query(
+    "SELECT id, customer_id, card_no, active FROM member_cards",
+  );
+  const [supRows] = await conn.query(
+    "SELECT id, legacy_id, name_zh, name_en, phone, active FROM suppliers",
+  );
   const [prodRows] = await conn.query(
-    "SELECT id, name_zh, name_en, legacy_c1, sell_price, last_purchase_cost, avg_cost FROM products",
+    "SELECT id, ubc, name_zh, name_en, legacy_c1, sell_price, fixed_price, last_purchase_cost, avg_cost, allow_item_discount, exclude_from_crm_bonus FROM products",
   );
   const [balRows] = await conn.query("SELECT id, on_hand_qty, moving_avg_cost FROM stock_balances");
 
@@ -144,6 +171,7 @@ export async function captureDbSnapshot(conn: Connection): Promise<DbSnapshot> {
       products,
       customers,
       memberCards,
+      suppliers,
       appSettings,
       billSequences,
     },
@@ -182,24 +210,62 @@ export async function captureDbSnapshot(conn: Connection): Promise<DbSnapshot> {
       email: r.email,
       pointsBalance: r.points_balance,
     })),
+    memberCards: (
+      cardRows as Array<{
+        id: number;
+        customer_id: number;
+        card_no: string;
+        active: number;
+      }>
+    ).map((r) => ({
+      id: r.id,
+      customerId: r.customer_id,
+      cardNo: r.card_no,
+      active: Number(r.active),
+    })),
+    suppliers: (
+      supRows as Array<{
+        id: number;
+        legacy_id: string;
+        name_zh: string;
+        name_en: string;
+        phone: string;
+        active: number;
+      }>
+    ).map((r) => ({
+      id: r.id,
+      legacyId: r.legacy_id,
+      nameZh: r.name_zh,
+      nameEn: r.name_en,
+      phone: r.phone,
+      active: Number(r.active),
+    })),
     products: (
       prodRows as Array<{
         id: number;
+        ubc: string;
         name_zh: string;
         name_en: string;
         legacy_c1: number;
         sell_price: string;
+        fixed_price: string | null;
         last_purchase_cost: string;
         avg_cost: string;
+        allow_item_discount: number;
+        exclude_from_crm_bonus: number;
       }>
     ).map((r) => ({
       id: r.id,
+      ubc: r.ubc,
       nameZh: r.name_zh,
       nameEn: r.name_en,
       legacyC1: r.legacy_c1,
       sellPrice: r.sell_price,
+      fixedPrice: r.fixed_price,
       lastPurchaseCost: r.last_purchase_cost,
       avgCost: r.avg_cost,
+      allowItemDiscount: Number(r.allow_item_discount),
+      excludeFromCrmBonus: Number(r.exclude_from_crm_bonus),
     })),
     stockBalances: (balRows as Array<{ id: number; on_hand_qty: string; moving_avg_cost: string }>).map((r) => ({
       id: r.id,
@@ -246,6 +312,7 @@ export async function restoreDbSnapshot(conn: Connection, snap: DbSnapshot): Pro
   await conn.query("DELETE FROM products WHERE id > ?", [m.products]);
   await conn.query("DELETE FROM member_cards WHERE id > ?", [m.memberCards]);
   await conn.query("DELETE FROM customers WHERE id > ?", [m.customers]);
+  await conn.query("DELETE FROM suppliers WHERE id > ?", [m.suppliers]);
   await conn.query("DELETE FROM app_settings WHERE id > ?", [m.appSettings]);
   await conn.query("DELETE FROM bill_sequences WHERE id > ?", [m.billSequences]);
 
@@ -266,35 +333,98 @@ export async function restoreDbSnapshot(conn: Connection, snap: DbSnapshot): Pro
     ]);
   }
 
-  // Restore any modified existing products, customers, or stock balances
+  // Restore any modified existing products, customers, member_cards, suppliers, or stock balances
   const [curProd] = await conn.query(
-    "SELECT id, sell_price, last_purchase_cost, avg_cost, name_zh, name_en, legacy_c1 FROM products WHERE id <= ?",
+    "SELECT id, ubc, sell_price, fixed_price, last_purchase_cost, avg_cost, name_zh, name_en, legacy_c1, allow_item_discount, exclude_from_crm_bonus FROM products WHERE id <= ?",
     [m.products],
   );
   const snapProdMap = new Map(snap.products.map((p) => [p.id, p]));
   for (const row of curProd as Array<{
     id: number;
+    ubc: string;
     sell_price: string;
+    fixed_price: string | null;
     last_purchase_cost: string;
     avg_cost: string;
     name_zh: string;
     name_en: string;
     legacy_c1: number;
+    allow_item_discount: number;
+    exclude_from_crm_bonus: number;
   }>) {
     const orig = snapProdMap.get(row.id);
     if (
       orig &&
-      (orig.sellPrice !== row.sell_price ||
+      (orig.ubc !== row.ubc ||
+        orig.sellPrice !== row.sell_price ||
+        orig.fixedPrice !== row.fixed_price ||
         orig.lastPurchaseCost !== row.last_purchase_cost ||
         orig.avgCost !== row.avg_cost ||
         orig.nameZh !== row.name_zh ||
         orig.nameEn !== row.name_en ||
-        orig.legacyC1 !== row.legacy_c1)
+        orig.legacyC1 !== row.legacy_c1 ||
+        orig.allowItemDiscount !== Number(row.allow_item_discount) ||
+        orig.excludeFromCrmBonus !== Number(row.exclude_from_crm_bonus))
     ) {
       await conn.query(
-        "UPDATE products SET sell_price=?, last_purchase_cost=?, avg_cost=?, name_zh=?, name_en=?, legacy_c1=? WHERE id=?",
-        [orig.sellPrice, orig.lastPurchaseCost, orig.avgCost, orig.nameZh, orig.nameEn, orig.legacyC1, orig.id],
+        "UPDATE products SET ubc=?, sell_price=?, fixed_price=?, last_purchase_cost=?, avg_cost=?, name_zh=?, name_en=?, legacy_c1=?, allow_item_discount=?, exclude_from_crm_bonus=? WHERE id=?",
+        [
+          orig.ubc,
+          orig.sellPrice,
+          orig.fixedPrice,
+          orig.lastPurchaseCost,
+          orig.avgCost,
+          orig.nameZh,
+          orig.nameEn,
+          orig.legacyC1,
+          orig.allowItemDiscount,
+          orig.excludeFromCrmBonus,
+          orig.id,
+        ],
       );
+    }
+  }
+
+  const [curCards] = await conn.query(
+    "SELECT id, customer_id, card_no, active FROM member_cards WHERE id <= ?",
+    [m.memberCards],
+  );
+  const snapCardMap = new Map(snap.memberCards.map((c) => [c.id, c]));
+  for (const row of curCards as Array<{ id: number; customer_id: number; card_no: string; active: number }>) {
+    const orig = snapCardMap.get(row.id);
+    if (orig && (orig.customerId !== row.customer_id || orig.cardNo !== row.card_no || orig.active !== Number(row.active))) {
+      await conn.query("UPDATE member_cards SET customer_id=?, card_no=?, active=? WHERE id=?", [
+        orig.customerId,
+        orig.cardNo,
+        orig.active,
+        orig.id,
+      ]);
+    }
+  }
+
+  const [curSup] = await conn.query(
+    "SELECT id, legacy_id, name_zh, name_en, phone, active FROM suppliers WHERE id <= ?",
+    [m.suppliers],
+  );
+  const snapSupMap = new Map(snap.suppliers.map((s) => [s.id, s]));
+  for (const row of curSup as Array<{ id: number; legacy_id: string; name_zh: string; name_en: string; phone: string; active: number }>) {
+    const orig = snapSupMap.get(row.id);
+    if (
+      orig &&
+      (orig.legacyId !== row.legacy_id ||
+        orig.nameZh !== row.name_zh ||
+        orig.nameEn !== row.name_en ||
+        orig.phone !== row.phone ||
+        orig.active !== Number(row.active))
+    ) {
+      await conn.query("UPDATE suppliers SET legacy_id=?, name_zh=?, name_en=?, phone=?, active=? WHERE id=?", [
+        orig.legacyId,
+        orig.nameZh,
+        orig.nameEn,
+        orig.phone,
+        orig.active,
+        orig.id,
+      ]);
     }
   }
 

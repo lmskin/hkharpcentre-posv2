@@ -18,6 +18,7 @@ export interface PosProduct {
   categoryLabel?: string;
   categoryC1: number;
   unitPriceHkd: number;
+  fixedPriceHkd?: number | null;
   allowItemDiscount?: boolean;
   isFixedPrice?: boolean;
   excludeFromCrmBonus?: boolean;

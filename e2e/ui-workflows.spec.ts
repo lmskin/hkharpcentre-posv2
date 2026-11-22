@@ -287,4 +287,122 @@ test.describe("UI Workflows: Classic POS, AR Invoices & Back Office (Real Chrome
     await page.getByRole("button", { name: "重新計算" }).click();
     await expect(page.getByText("開櫃銀頭")).toBeVisible();
   });
+
+  test("UI 6: Open-Price 改價, Salesperson/Promo Presets, Offline Outbox Replay, Enhanced 查單, Manager 營業統計, Suppliers, Barcode Label & 80mm/A4 Print", async ({
+    page,
+  }) => {
+    await loginThroughUi(page, "000000");
+
+    // 1. Open-price SKU HCHP69 ($0.00 -> 38000 via 改價) + fixed-price 350104-001 -> 026 modal
+    await enterBarcodeOnPos(page, "HCHP69");
+    await expect(page.locator("tbody tr", { hasText: "HCHP69" })).toBeVisible();
+    await page.getByPlaceholder("條碼", { exact: true }).fill("38000");
+    await page.getByRole("button", { name: /改價/ }).click();
+    await expect(page.locator("tbody tr", { hasText: "HCHP69" })).toContainText("HK$38,000.00");
+    await page.getByRole("button", { name: "取消項目" }).click();
+
+    await enterBarcodeOnPos(page, "350104-001");
+    await page.getByPlaceholder("條碼", { exact: true }).fill("200");
+    await page.getByRole("button", { name: /改價/ }).click();
+    await expect(page.getByRole("dialog", { name: "營運通訊息 - 026" })).toBeVisible();
+    await page.getByRole("dialog", { name: "營運通訊息 - 026" }).getByRole("button", { name: "離開" }).click();
+    await page.getByRole("button", { name: "取消項目" }).click();
+
+    // 2. Select salesperson in 職員 panel & apply VIP 9折 (10%) preset in 優惠 panel
+    await enterBarcodeOnPos(page, "210810");
+    await page.getByRole("button", { name: /職員/ }).click();
+    await expect(page.locator("tbody tr", { hasText: "101" }).first()).toBeVisible();
+    await page.locator("tbody tr", { hasText: "101" }).first().click();
+    await expect(page.getByText(/銷售員：/)).toBeVisible();
+
+    await page.getByRole("button", { name: /優惠/ }).click();
+    await page.getByRole("button", { name: "VIP 9折 (10%)" }).click();
+    await expect(page.locator("tbody tr", { hasText: "210810" })).toContainText("HK$101.70");
+
+    // 3. Offline Outbox queue (abort /api/bills -> 999 -> unroute -> 離線單據重送 (1))
+    await page.route("**/api/bills", (route) => route.abort("failed"));
+    await page.getByRole("button", { name: /^✅/ }).click();
+    await expect(page.getByRole("dialog", { name: "營運通訊息 - 999" })).toBeVisible();
+    await page.getByRole("dialog", { name: "營運通訊息 - 999" }).getByRole("button", { name: "離開" }).click();
+    await page.unroute("**/api/bills");
+
+    await page.getByRole("button", { name: /收銀員/ }).click();
+    await page.getByRole("button", { name: /離線單據重送 \(1\)/ }).click();
+    await expect(page.getByText("已重送 1 筆離線單據，剩餘 0 筆")).toBeVisible();
+
+    // 4. Enhanced 查單: search VIP, filter 完成單, void with 客人取消 preset -> filter 取消單
+    await page.locator('button[title="查單"]').first().click();
+    const queryDlg = page.getByRole("dialog", { name: "查單" });
+    await expect(queryDlg).toBeVisible();
+    await queryDlg.getByPlaceholder("搜尋單號 / 會員 / 電話").fill("VIP");
+    await queryDlg.getByRole("button", { name: "完成單", exact: true }).click();
+    await expect(queryDlg.locator("tbody tr", { hasText: "POS-" }).first()).toBeVisible();
+
+    await queryDlg.getByRole("button", { name: "取消", exact: true }).click();
+    await queryDlg.getByRole("button", { name: "客人取消", exact: true }).click();
+    await queryDlg.getByRole("button", { name: "確定取消單" }).click();
+    await queryDlg.getByRole("button", { name: "取消單", exact: true }).click();
+    await expect(queryDlg.locator("tbody tr", { hasText: "已取消" }).first()).toBeVisible();
+    await queryDlg.getByRole("button", { name: "離開" }).click();
+
+    // 5. Manager 營業統計 (會員/職員/分類) + CSV export
+    await page.getByRole("button", { name: /經理/ }).click();
+    await page.getByRole("button", { name: "營業統計 (會員/職員/分類)" }).click();
+    const statsDlg = page.getByRole("dialog", { name: "營業統計" });
+    await expect(statsDlg).toBeVisible();
+    await statsDlg.getByRole("button", { name: "職員統計" }).click();
+    await statsDlg.getByRole("button", { name: "交易及損耗紀錄" }).click();
+    const [statsDl] = await Promise.all([
+      page.waitForEvent("download"),
+      statsDlg.getByRole("button", { name: "匯出 CSV" }).click(),
+    ]);
+    expect(statsDl.suggestedFilename()).toMatch(/^stats-/);
+    await statsDlg.getByRole("button", { name: "離開" }).click();
+
+    // 6. 其他交易 -> 到貨 -> select migrated supplier -> post
+    await page.getByRole("button", { name: /其他交易/ }).click();
+    await page.getByRole("button", { name: "到貨", exact: true }).click();
+    const officeDlg = page.getByRole("dialog", { name: "其他交易" });
+    await expect(officeDlg).toBeVisible();
+    await expect(officeDlg.locator('select[aria-label="供應商"] option')).not.toHaveCount(1);
+    await officeDlg.getByLabel("供應商", { exact: true }).selectOption({ index: 1 });
+    await officeDlg.getByPlaceholder("搜尋條碼 / 貨品").fill("210810");
+    await officeDlg.locator("button", { hasText: "210810" }).first().click();
+    await officeDlg.getByRole("button", { name: "完成" }).click();
+    await expect(officeDlg.getByText(/已完成並落庫/)).toBeVisible();
+    await officeDlg.getByRole("button", { name: "離開" }).click();
+
+    // 7. Back Office pagination, barcode label preview, cardNo update, suppliers page & 80mm/A4 print toggle
+    await page.goto("/backoffice/products");
+    await expect(page.getByText(/Page 1\//)).toBeVisible();
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect(page.getByText(/Page 2\//)).toBeVisible();
+    await page.locator("tbody tr").first().click();
+    await page.getByRole("button", { name: /列印條碼標籤/ }).click();
+    await expect(page.getByRole("dialog", { name: "條碼標籤預覽" })).toContainText("HK HARP CENTRE");
+
+    await page.goto("/backoffice/customers");
+    await expect(page.getByText(/Page 1\//)).toBeVisible();
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect(page.getByText(/Page 2\//)).toBeVisible();
+    await page.getByPlaceholder(/Search ID, card/).fill("Yeung Kam Yan");
+    await page.locator("tbody tr", { hasText: "2261" }).first().click();
+    await page.getByPlaceholder("e.g. RWC-0001").fill("E2E-UI-CARD-9");
+    await page.getByRole("button", { name: "Update Customer" }).click();
+    await expect(page.getByText("Updated customer 2261")).toBeVisible();
+    await page.getByPlaceholder(/Search ID, card/).fill("E2E-UI-CARD-9");
+    await expect(page.locator("tbody tr", { hasText: "2261" }).first()).toBeVisible();
+
+    await page.goto("/backoffice/suppliers");
+    await expect(page.getByText("Total 76 suppliers")).toBeVisible();
+
+    await page.goto("/invoices");
+    await page.getByRole("button", { name: "All", exact: true }).click();
+    await page.getByRole("link", { name: "Print" }).first().click();
+    await page.waitForURL("**/invoices/**/print");
+    await page.getByRole("button", { name: "80mm Thermal Receipt" }).click();
+    await expect(page.getByText(/歡迎再次光臨/)).toBeVisible();
+    await page.getByRole("button", { name: "A4 Formal Invoice" }).click();
+    await expect(page.getByText("Bank Transfer Payment Instructions")).toBeVisible();
+  });
 });

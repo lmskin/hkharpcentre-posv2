@@ -5,10 +5,13 @@ import { requireAuthenticatedSession } from "@/lib/session";
 
 const UpsertProductSchema = z.object({
   barcode: z.string().trim().min(1).max(40),
+  ubc: z.string().trim().max(40).optional(),
   nameZh: z.string().trim().min(1).max(200),
   nameEn: z.string().trim().max(200).default(""),
   legacyC1: z.number().int().min(0).max(999),
   sellPriceHkd: z.number().nonnegative(),
+  fixedPriceHkd: z.number().nonnegative().nullable().optional(),
+  allowItemDiscount: z.boolean().optional(),
   excludeFromCrmBonus: z.boolean().optional(),
 });
 

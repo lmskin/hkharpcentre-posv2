@@ -91,6 +91,7 @@ export interface CreateBillOrInvoiceTxInput {
   shopId: number;
   terminalId: number;
   staffId: number;
+  actorStaffId?: number;
   docType: BillDocType;
   status?: "completed" | "held";
   supersedeInvoiceNo?: string;
@@ -175,7 +176,12 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
       if (oldRows.length === 0) {
         throw new Error(`Original bill ${input.supersedeInvoiceNo} not found for amendment`);
       }
-      await voidLockedBillInsideTx(tx, oldRows[0]!, input.staffId, `Superseded by ${invoiceNo}`);
+      await voidLockedBillInsideTx(
+        tx,
+        oldRows[0]!,
+        input.actorStaffId ?? input.staffId,
+        `Superseded by ${invoiceNo}`,
+      );
     }
 
     const totals = calculateBillTotals(
@@ -315,7 +321,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
     if (isHeld) {
       await tx.insert(auditLogs).values({
         shopId: input.shopId,
-        staffId: input.staffId,
+        staffId: input.actorStaffId ?? input.staffId,
         action: "HOLD_BILL",
         entityType: "bills",
         entityId: invoiceNo,
@@ -366,7 +372,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
           billId,
           payMethodId,
           clientIdempotencyKey: `${rawPmt.clientIdempotencyKey}#${i}`,
-          staffId: input.staffId,
+          staffId: input.actorStaffId ?? input.staffId,
           tenderCode: rawPmt.tenderCode,
           amount: applied.amountHkd.toFixed(4),
           tipsAmount: "0.0000",
@@ -487,7 +493,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
 
     await tx.insert(auditLogs).values({
       shopId: input.shopId,
-      staffId: input.staffId,
+      staffId: input.actorStaffId ?? input.staffId,
       action: input.docType === "SALES_INVOICE" ? "ISSUE_INVOICE" : "CREATE_BILL",
       entityType: "bills",
       entityId: invoiceNo,

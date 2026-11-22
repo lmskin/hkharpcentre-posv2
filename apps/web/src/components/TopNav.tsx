@@ -10,6 +10,7 @@ const NAV_LINKS = [
   { href: "/invoices", label: "Invoices & AR" },
   { href: "/backoffice/products", label: "Products" },
   { href: "/backoffice/customers", label: "Customers" },
+  { href: "/backoffice/suppliers", label: "Suppliers" },
   { href: "/backoffice/stock", label: "Stock" },
   { href: "/backoffice/other-transactions", label: "Other Transactions" },
   { href: "/backoffice/day-end", label: "Day-End" },

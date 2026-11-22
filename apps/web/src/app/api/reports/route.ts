@@ -4,6 +4,7 @@ import {
   getHistoricalSalesReport,
   getHourlySalesReport,
   getItemSalesReport,
+  getManagerStatsReport,
   getOperationalReports,
 } from "@hkharp/db";
 import { requireAuthenticatedSession } from "@/lib/session";
@@ -27,6 +28,9 @@ export async function GET(request: Request) {
   const toDate = url.searchParams.get("to") ?? today;
   if (view === "history") {
     return NextResponse.json(await getHistoricalSalesReport(fromDate, toDate, auth.session.shopId));
+  }
+  if (view === "stats") {
+    return NextResponse.json(await getManagerStatsReport({ fromDate, toDate, shopId: auth.session.shopId }));
   }
   const report = await getOperationalReports({ fromDate, toDate, shopId: auth.session.shopId });
   return NextResponse.json(report);

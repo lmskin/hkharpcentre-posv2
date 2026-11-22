@@ -55,9 +55,13 @@ const DOC_LABELS: Record<string, string> = {
   SALES_RETURN: "退貨",
   PETTY_PAYOUT: "Payout",
   GOODS_RECEIPT: "到貨",
+  PURCHASE_RETURN: "退貨確認",
   STOCK_TRANSFER_OUT: "轉出",
+  STOCK_TRANSFER_IN: "轉入",
   WRITE_OFF: "報銷",
   STOCK_ADJUSTMENT: "調整",
+  STOCKTAKE: "盤點",
+  CRM_POINT_TXN: "積分調整",
 };
 
 export function ReceiptPreview({ detail }: { detail: ReceiptDetail }) {
@@ -107,6 +111,7 @@ export function ReceiptPreview({ detail }: { detail: ReceiptDetail }) {
       <div className="text-center">
         <div>恒生銀行戶口：香港豎琴中心</div>
         <div>多謝惠顧 · 貨品出門恕不退換</div>
+        <div className="mt-0.5">歡迎再次光臨 · Thank you for your purchase</div>
         <div className="mt-3 h-12 w-full" style={{ background: "repeating-linear-gradient(90deg,#000 0,#000 2px,#fff 2px,#fff 4px,#000 4px,#000 5px,#fff 5px,#fff 8px)" }} />
         <div className="mt-1 tracking-[0.25em]">{bill.invoiceNo}</div>
       </div>

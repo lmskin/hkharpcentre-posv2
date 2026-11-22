@@ -4,7 +4,7 @@ import { createDb, type HarpDb } from "./client";
 import { verifySecret } from "./auth";
 import { auditLogs, shops, staff, staffRoles, terminals } from "./schema/org-auth";
 import { categories, posMenuButtons, posMenus, products, units } from "./schema/catalog";
-import { crmPointLedger, customerGrades, customers } from "./schema/crm";
+import { crmPointLedger, customerGrades, customers, memberCards, suppliers } from "./schema/crm";
 import { billLines, bills, deliveryOrders } from "./schema/sales-ar";
 import { billPayments } from "./schema/payments";
 import { appSettings, dayEndBatches, stockBalances, stockMovements } from "./schema/stock-ops";
@@ -292,6 +292,7 @@ export async function listCatalogProducts(limit = 60) {
     categoryLabel: `${r.categoryNameEn ?? "General"} (C1=${r.categoryC1})`,
     categoryC1: r.categoryC1,
     unitPriceHkd: Number(r.sellPrice),
+    fixedPriceHkd: r.fixedPrice !== null ? Number(r.fixedPrice) : null,
     avgCostHkd: Number(r.avgCost),
     allowItemDiscount: r.allowItemDiscount,
     isFixedPrice: r.fixedPrice !== null,
@@ -354,6 +355,7 @@ export async function searchProducts(params: { q?: string; categoryC1?: number; 
     categoryLabel: `${r.categoryNameEn ?? "General"} (C1=${r.categoryC1})`,
     categoryC1: r.categoryC1,
     unitPriceHkd: Number(r.sellPrice),
+    fixedPriceHkd: r.fixedPrice !== null ? Number(r.fixedPrice) : null,
     avgCostHkd: Number(r.avgCost),
     allowItemDiscount: r.allowItemDiscount,
     isFixedPrice: r.fixedPrice !== null,
@@ -418,6 +420,7 @@ export async function findExactProductByCode(code: string) {
     nameEn: r.nameEn || r.nameZh,
     categoryC1: r.categoryC1,
     unitPriceHkd: Number(r.sellPrice),
+    fixedPriceHkd: r.fixedPrice !== null ? Number(r.fixedPrice) : null,
     avgCostHkd: Number(r.avgCost),
     allowItemDiscount: r.allowItemDiscount,
     isFixedPrice: r.fixedPrice !== null,
@@ -436,10 +439,13 @@ export async function listCategoriesAndUnits() {
 
 export async function upsertProductRecord(input: {
   barcode: string;
+  ubc?: string;
   nameZh: string;
   nameEn: string;
   legacyC1: number;
   sellPriceHkd: number;
+  fixedPriceHkd?: number | null;
+  allowItemDiscount?: boolean;
   excludeFromCrmBonus?: boolean;
 }) {
   const conn = requireSharedDb();
@@ -452,11 +458,19 @@ export async function upsertProductRecord(input: {
     await conn.db
       .update(products)
       .set({
+        ubc: input.ubc !== undefined ? input.ubc : existing[0]!.ubc,
         nameZh: input.nameZh,
         nameEn: input.nameEn,
         legacyC1: input.legacyC1,
         categoryId: cat?.id ?? existing[0]!.categoryId,
         sellPrice: input.sellPriceHkd.toFixed(4),
+        fixedPrice:
+          input.fixedPriceHkd !== undefined
+            ? input.fixedPriceHkd !== null
+              ? input.fixedPriceHkd.toFixed(4)
+              : null
+            : existing[0]!.fixedPrice,
+        allowItemDiscount: input.allowItemDiscount ?? existing[0]!.allowItemDiscount,
         excludeFromCrmBonus: input.excludeFromCrmBonus ?? existing[0]!.excludeFromCrmBonus,
         updatedAt: new Date(),
       })
@@ -467,11 +481,15 @@ export async function upsertProductRecord(input: {
   const res = await conn.db.insert(products).values({
     shopId,
     barcode: input.barcode,
+    ubc: input.ubc ?? "",
     nameZh: input.nameZh,
     nameEn: input.nameEn,
     legacyC1: input.legacyC1,
     categoryId: cat?.id ?? null,
     sellPrice: input.sellPriceHkd.toFixed(4),
+    fixedPrice:
+      input.fixedPriceHkd !== undefined && input.fixedPriceHkd !== null ? input.fixedPriceHkd.toFixed(4) : null,
+    allowItemDiscount: input.allowItemDiscount ?? true,
     excludeFromCrmBonus: input.excludeFromCrmBonus ?? false,
     active: true,
   });
@@ -633,10 +651,39 @@ export async function listStaffPage(params: { q?: string; page?: number; pageSiz
   return { items: rows, total, page, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)) };
 }
 
+async function syncCustomerCardNo(db: HarpDb, customerId: number, cardNo?: string) {
+  if (cardNo === undefined) return;
+  const cleanCard = cardNo.trim();
+  await db
+    .update(memberCards)
+    .set({ active: false })
+    .where(
+      cleanCard
+        ? and(eq(memberCards.customerId, customerId), ne(memberCards.cardNo, cleanCard))
+        : eq(memberCards.customerId, customerId),
+    );
+  if (!cleanCard) return;
+
+  const existingCard = await db
+    .select()
+    .from(memberCards)
+    .where(eq(memberCards.cardNo, cleanCard))
+    .limit(1);
+  if (existingCard.length > 0) {
+    await db
+      .update(memberCards)
+      .set({ customerId, active: true })
+      .where(eq(memberCards.id, existingCard[0]!.id));
+  } else {
+    await db.insert(memberCards).values({ customerId, cardNo: cleanCard, active: true });
+  }
+}
+
 export async function upsertCustomerRecord(input: {
   id?: number;
   legacyId?: string;
   gradeId?: number | null;
+  cardNo?: string;
   nameZh: string;
   nameEn?: string;
   phone?: string;
@@ -656,6 +703,7 @@ export async function upsertCustomerRecord(input: {
           email: input.email ?? existingById[0]!.email,
         })
         .where(eq(customers.id, existingById[0]!.id));
+      await syncCustomerCardNo(conn.db, existingById[0]!.id, input.cardNo);
       return { ok: true, id: existingById[0]!.id, legacyId: existingById[0]!.legacyId };
     }
   }
@@ -672,6 +720,7 @@ export async function upsertCustomerRecord(input: {
         email: input.email ?? existing[0]!.email,
       })
       .where(eq(customers.id, existing[0]!.id));
+    await syncCustomerCardNo(conn.db, existing[0]!.id, input.cardNo);
     return { ok: true, id: existing[0]!.id, legacyId: idKey };
   }
   const res = await conn.db.insert(customers).values({
@@ -683,6 +732,95 @@ export async function upsertCustomerRecord(input: {
     email: input.email ?? "",
     pointsBalance: 0,
     active: true,
+  });
+  const newId = Number(res[0].insertId);
+  await syncCustomerCardNo(conn.db, newId, input.cardNo);
+  return { ok: true, id: newId, legacyId: idKey };
+}
+
+function buildSupplierFilter(q?: string) {
+  const clean = q?.trim();
+  if (!clean) return undefined;
+  const pattern = `%${clean}%`;
+  return or(
+    like(suppliers.legacyId, pattern),
+    like(suppliers.nameZh, pattern),
+    like(suppliers.nameEn, pattern),
+    like(suppliers.phone, pattern),
+  );
+}
+
+export async function listSuppliers(params?: { q?: string; limit?: number }) {
+  const conn = requireSharedDb();
+  const limit = Math.min(params?.limit ?? 100, 200);
+  const filter = buildSupplierFilter(params?.q);
+  return conn.db
+    .select()
+    .from(suppliers)
+    .where(filter)
+    .orderBy(suppliers.legacyId)
+    .limit(limit);
+}
+
+export async function countSuppliers(q?: string) {
+  const conn = requireSharedDb();
+  const filter = buildSupplierFilter(q);
+  const [row] = await conn.db
+    .select({ total: sql<number>`COUNT(*)` })
+    .from(suppliers)
+    .where(filter);
+  return Number(row?.total ?? 0);
+}
+
+export async function upsertSupplierRecord(input: {
+  id?: number;
+  legacyId?: string;
+  nameZh: string;
+  nameEn?: string;
+  phone?: string;
+  active?: boolean;
+}) {
+  const conn = requireSharedDb();
+  const cleanLegacyId = input.legacyId?.trim();
+  if (input.id) {
+    const existingById = await conn.db.select().from(suppliers).where(eq(suppliers.id, input.id)).limit(1);
+    if (existingById.length > 0) {
+      const nextLegacyId = cleanLegacyId || existingById[0]!.legacyId;
+      await conn.db
+        .update(suppliers)
+        .set({
+          legacyId: nextLegacyId,
+          nameZh: input.nameZh,
+          nameEn: input.nameEn ?? existingById[0]!.nameEn,
+          phone: input.phone ?? existingById[0]!.phone,
+          active: input.active ?? existingById[0]!.active,
+        })
+        .where(eq(suppliers.id, existingById[0]!.id));
+      return { ok: true, id: existingById[0]!.id, legacyId: nextLegacyId };
+    }
+  }
+
+  const idKey = cleanLegacyId || `SUP${Date.now().toString().slice(-6)}`;
+  const existing = await conn.db.select().from(suppliers).where(eq(suppliers.legacyId, idKey)).limit(1);
+  if (existing.length > 0) {
+    await conn.db
+      .update(suppliers)
+      .set({
+        nameZh: input.nameZh,
+        nameEn: input.nameEn ?? existing[0]!.nameEn,
+        phone: input.phone ?? existing[0]!.phone,
+        active: input.active ?? existing[0]!.active,
+      })
+      .where(eq(suppliers.id, existing[0]!.id));
+    return { ok: true, id: existing[0]!.id, legacyId: idKey };
+  }
+
+  const res = await conn.db.insert(suppliers).values({
+    legacyId: idKey,
+    nameZh: input.nameZh,
+    nameEn: input.nameEn ?? "",
+    phone: input.phone ?? "",
+    active: input.active ?? true,
   });
   return { ok: true, id: Number(res[0].insertId), legacyId: idKey };
 }
@@ -776,22 +914,69 @@ export async function listInvoices(params: {
   }));
 }
 
-export async function listBillQuery(view: "today" | "held" | "office" | "unprocessed", shopId: number) {
+export type BillQueryView = "today" | "held" | "office" | "unprocessed";
+export type BillQuerySubFilter = "all" | "last30" | "completed" | "cancelled" | "deposit";
+
+export async function listBillQuery(
+  viewOrParams:
+    | BillQueryView
+    | {
+        view: BillQueryView;
+        shopId: number;
+        q?: string;
+        date?: string;
+        subFilter?: BillQuerySubFilter;
+      },
+  shopIdArg?: number,
+) {
   const conn = requireSharedDb();
   const today = formatHktBusinessDate();
+  const view = typeof viewOrParams === "string" ? viewOrParams : viewOrParams.view;
+  const shopId = typeof viewOrParams === "string" ? (shopIdArg ?? 1) : viewOrParams.shopId;
+  const q = typeof viewOrParams === "string" ? undefined : viewOrParams.q?.trim();
+  const date = typeof viewOrParams === "string" ? undefined : viewOrParams.date?.trim();
+  const subFilter = (typeof viewOrParams === "string" ? "all" : viewOrParams.subFilter) ?? "all";
   const retailTypes = ["RETAIL_SALE", "SALES_INVOICE", "SALES_RETURN"];
   const filters = [eq(bills.shopId, shopId)];
 
   if (view === "today") {
-    filters.push(eq(bills.businessDate, today), inArray(bills.docType, retailTypes), ne(bills.sourceTable, "OfficeXHeader"));
+    if (date !== "ALL") {
+      filters.push(eq(bills.businessDate, date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : today));
+    }
+    filters.push(inArray(bills.docType, retailTypes), ne(bills.sourceTable, "OfficeXHeader"));
   } else if (view === "held") {
     filters.push(inArray(bills.status, ["held", "intraday"]));
   } else if (view === "office") {
-    filters.push(sql`(${bills.docType} NOT IN ('RETAIL_SALE', 'SALES_INVOICE', 'SALES_RETURN') OR ${bills.sourceTable} = 'OfficeXHeader')`);
+    filters.push(
+      sql`(${bills.docType} NOT IN ('RETAIL_SALE', 'SALES_INVOICE', 'SALES_RETURN') OR ${bills.sourceTable} = 'OfficeXHeader')`,
+    );
   } else {
     filters.push(
       sql`${bills.status} <> 'cancelled'`,
       sql`(${bills.status} IN ('open', 'held', 'intraday') OR ${bills.balanceDue} > 0 OR ${deliveryOrders.deliveryStatus} = 'pending')`,
+    );
+  }
+
+  if (subFilter === "completed") {
+    filters.push(inArray(bills.status, ["completed", "sealed"]), eq(bills.paymentStatus, "paid"));
+  } else if (subFilter === "cancelled") {
+    filters.push(eq(bills.status, "cancelled"));
+  } else if (subFilter === "deposit") {
+    filters.push(ne(bills.status, "cancelled"), sql`${bills.balanceDue} > 0`);
+  }
+
+  if (q) {
+    const p = `%${q}%`;
+    filters.push(
+      or(
+        like(bills.invoiceNo, p),
+        like(bills.legacySc, p),
+        like(bills.notes, p),
+        like(customers.legacyId, p),
+        like(customers.nameZh, p),
+        like(customers.nameEn, p),
+        like(customers.phone, p),
+      )!,
     );
   }
 
@@ -815,7 +1000,7 @@ export async function listBillQuery(view: "today" | "held" | "office" | "unproce
     .leftJoin(deliveryOrders, eq(deliveryOrders.billId, bills.id))
     .where(and(...filters))
     .orderBy(desc(bills.issuedAt), desc(bills.id))
-    .limit(200);
+    .limit(subFilter === "last30" ? 30 : 200);
 
   return rows.map((row) => ({
     invoiceNo: row.invoiceNo,
@@ -896,9 +1081,9 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
         ? {
             id: bill.customerId!,
             legacyId: bill.customerLegacyId,
-            nameZh: bill.customerNameZh,
-            nameEn: bill.customerNameEn,
-            phone: bill.customerPhone,
+            nameZh: bill.customerNameZh ?? "",
+            nameEn: bill.customerNameEn ?? "",
+            phone: bill.customerPhone ?? "",
             pointsBalance: bill.customerPointsBalance ?? 0,
           }
         : null,
@@ -1386,4 +1571,82 @@ export async function getCustomerPointLedger(customerId: number) {
     .where(eq(crmPointLedger.customerId, customerId))
     .orderBy(desc(crmPointLedger.createdAt))
     .limit(30);
+}
+
+export async function getManagerStatsReport(params: { fromDate: string; toDate: string; shopId: number }) {
+  const conn = requireSharedDb();
+  const salesNetExpr = sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.netAmount} ELSE ${bills.netAmount} END), 0)`;
+  const baseDateFilters = [
+    eq(bills.shopId, params.shopId),
+    sql`${bills.status} <> 'cancelled'`,
+    sql`${bills.businessDate} >= ${params.fromDate}`,
+    sql`${bills.businessDate} <= ${params.toDate}`,
+  ];
+
+  const [custRows, staffRows, docRows] = await Promise.all([
+    conn.db
+      .select({
+        customerId: customers.id,
+        legacyId: customers.legacyId,
+        nameZh: customers.nameZh,
+        nameEn: customers.nameEn,
+        pointsBalance: customers.pointsBalance,
+        billCount: sql<number>`COUNT(*)`,
+        netSpend: salesNetExpr,
+      })
+      .from(bills)
+      .innerJoin(customers, eq(bills.customerId, customers.id))
+      .where(and(...baseDateFilters, inArray(bills.docType, [...SALES_DOC_TYPES])))
+      .groupBy(customers.id, customers.legacyId, customers.nameZh, customers.nameEn, customers.pointsBalance)
+      .orderBy(desc(sql`SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.netAmount} ELSE ${bills.netAmount} END)`))
+      .limit(50),
+    conn.db
+      .select({
+        staffId: bills.staffId,
+        legacyId: staff.legacyId,
+        displayName: staff.displayName,
+        billCount: sql<number>`COUNT(*)`,
+        netSales: salesNetExpr,
+      })
+      .from(bills)
+      .leftJoin(staff, eq(bills.staffId, staff.id))
+      .where(and(...baseDateFilters, inArray(bills.docType, [...SALES_DOC_TYPES])))
+      .groupBy(bills.staffId, staff.legacyId, staff.displayName)
+      .orderBy(desc(sql`SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.netAmount} ELSE ${bills.netAmount} END)`)),
+    conn.db
+      .select({
+        docType: bills.docType,
+        docCount: sql<number>`COUNT(*)`,
+        totalAmount: sql<string>`COALESCE(SUM(${bills.netAmount}), 0)`,
+      })
+      .from(bills)
+      .where(and(...baseDateFilters))
+      .groupBy(bills.docType)
+      .orderBy(desc(sql`COUNT(*)`)),
+  ]);
+
+  return {
+    range: { fromDate: params.fromDate, toDate: params.toDate },
+    customerStats: custRows.map((r) => ({
+      customerId: r.customerId,
+      legacyId: r.legacyId,
+      nameZh: r.nameZh,
+      nameEn: r.nameEn,
+      pointsBalance: r.pointsBalance,
+      billCount: Number(r.billCount),
+      netSpendHkd: Number(r.netSpend),
+    })),
+    staffStats: staffRows.map((r) => ({
+      staffId: r.staffId ?? 0,
+      legacyId: r.legacyId ?? "N/A",
+      displayName: r.displayName ?? "Unassigned",
+      billCount: Number(r.billCount),
+      netSalesHkd: Number(r.netSales),
+    })),
+    docTypeStats: docRows.map((r) => ({
+      docType: r.docType,
+      docCount: Number(r.docCount),
+      totalAmountHkd: Number(r.totalAmount),
+    })),
+  };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface CustomerRow {
   id: number;
@@ -29,13 +29,22 @@ interface PointLedgerRow {
   createdAt: string;
 }
 
+const PAGE_SIZE = 50;
+
 export default function CustomersBackOfficePage() {
   const [customers, setCustomers] = useState<CustomerRow[]>([]);
   const [grades, setGrades] = useState<CustomerGrade[]>([]);
   const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
+  const [loadedPage, setLoadedPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [pageCount, setPageCount] = useState(1);
+  const reqSeqRef = useRef(0);
+
   const [editingId, setEditingId] = useState<number | undefined>(undefined);
   const [legacyId, setLegacyId] = useState("");
   const [gradeId, setGradeId] = useState<string>("");
+  const [cardNo, setCardNo] = useState("");
   const [nameZh, setNameZh] = useState("");
   const [nameEn, setNameEn] = useState("");
   const [phone, setPhone] = useState("");
@@ -43,23 +52,37 @@ export default function CustomersBackOfficePage() {
   const [ledger, setLedger] = useState<PointLedgerRow[]>([]);
   const [msg, setMsg] = useState("");
 
-  async function loadCustomers(query: string) {
-    const res = await fetch(`/api/customers?q=${encodeURIComponent(query)}&limit=60`);
+  async function loadCustomers(query: string, targetPage: number) {
+    const seq = ++reqSeqRef.current;
+    const res = await fetch(
+      `/api/customers?q=${encodeURIComponent(query)}&page=${targetPage}&pageSize=${PAGE_SIZE}`,
+    );
     if (res.ok) {
-      const data = (await res.json()) as { customers: CustomerRow[]; grades?: CustomerGrade[] };
+      const data = (await res.json()) as {
+        customers: CustomerRow[];
+        grades?: CustomerGrade[];
+        total: number;
+        page: number;
+        pageCount: number;
+      };
+      if (seq !== reqSeqRef.current) return;
       setCustomers(data.customers);
+      setTotal(data.total);
+      setLoadedPage(data.page);
+      setPageCount(data.pageCount);
       if (data.grades) setGrades(data.grades);
     }
   }
 
   useEffect(() => {
-    void loadCustomers("");
-  }, []);
+    void loadCustomers(q, page);
+  }, [q, page]);
 
   async function selectCustomer(c: CustomerRow) {
     setEditingId(c.id);
     setLegacyId(c.legacyId);
     setGradeId(c.gradeId ? String(c.gradeId) : "");
+    setCardNo(c.cardNo ?? "");
     setNameZh(c.nameZh);
     setNameEn(c.nameEn);
     setPhone(c.phone);
@@ -75,6 +98,7 @@ export default function CustomersBackOfficePage() {
     setEditingId(undefined);
     setLegacyId("");
     setGradeId("");
+    setCardNo("");
     setNameZh("");
     setNameEn("");
     setPhone("");
@@ -92,6 +116,7 @@ export default function CustomersBackOfficePage() {
         id: editingId,
         legacyId: legacyId.trim() || undefined,
         gradeId: gradeId ? Number(gradeId) : null,
+        cardNo: cardNo.trim(),
         nameZh,
         nameEn,
         phone,
@@ -105,20 +130,25 @@ export default function CustomersBackOfficePage() {
     }
     setMsg(editingId ? `Updated customer ${data.legacyId}` : `Saved customer ${data.legacyId}`);
     resetForm();
-    await loadCustomers(q);
+    await loadCustomers(q, page);
   }
 
   return (
     <div className="grid gap-6 lg:grid-cols-12">
       <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs lg:col-span-8">
-        <div className="flex items-center justify-between">
-          <h1 className="text-lg font-bold text-slate-900">CRM Customers &amp; Bonus Points</h1>
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h1 className="text-lg font-bold text-slate-900">CRM Customers &amp; Bonus Points</h1>
+            <div className="text-xs text-slate-500">
+              Total {total.toLocaleString()} members · Page {loadedPage}/{pageCount}
+            </div>
+          </div>
           <input
             type="search"
             value={q}
             onChange={(e) => {
               setQ(e.target.value);
-              void loadCustomers(e.target.value);
+              setPage(1);
             }}
             placeholder="Search ID, card #, name, or phone..."
             className="w-64 rounded-lg border border-slate-300 px-3 py-1.5 text-xs"
@@ -152,6 +182,30 @@ export default function CustomersBackOfficePage() {
             </tbody>
           </table>
         </div>
+
+        <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3 text-xs">
+          <span className="text-slate-500">
+            Page {loadedPage} of {pageCount} ({total} members)
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="rounded border border-slate-300 px-3 py-1 disabled:opacity-40 hover:bg-slate-50"
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              disabled={page >= pageCount}
+              onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+              className="rounded border border-slate-300 px-3 py-1 disabled:opacity-40 hover:bg-slate-50"
+            >
+              Next
+            </button>
+          </div>
+        </div>
       </section>
 
       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-xs lg:col-span-4">
@@ -164,20 +218,31 @@ export default function CustomersBackOfficePage() {
           ) : null}
         </div>
         <form onSubmit={(e) => void handleCreate(e)} className="space-y-3 text-xs">
-          <div>
-            <label className="block font-medium text-slate-600">Grade</label>
-            <select
-              value={gradeId}
-              onChange={(e) => setGradeId(e.target.value)}
-              className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
-            >
-              <option value="">Default / Unassigned</option>
-              {grades.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.nameZh || g.nameEn}
-                </option>
-              ))}
-            </select>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block font-medium text-slate-600">Grade</label>
+              <select
+                value={gradeId}
+                onChange={(e) => setGradeId(e.target.value)}
+                className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
+              >
+                <option value="">Default / Unassigned</option>
+                {grades.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.nameZh || g.nameEn}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block font-medium text-slate-600">Member Card No.</label>
+              <input
+                value={cardNo}
+                onChange={(e) => setCardNo(e.target.value)}
+                placeholder="e.g. RWC-0001"
+                className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 font-mono"
+              />
+            </div>
           </div>
           <div>
             <label className="block font-medium text-slate-600">Chinese Name</label>
