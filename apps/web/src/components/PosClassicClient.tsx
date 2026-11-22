@@ -36,6 +36,7 @@ import { HourlyReport } from "@/components/reports/HourlyReport";
 import { ItemReport } from "@/components/reports/ItemReport";
 import { HistoryReport } from "@/components/reports/HistoryReport";
 import { ManagerStatsReport } from "@/components/reports/ManagerStatsReport";
+import { LegacyReportCenter, type ReportCenterTab } from "@/components/reports/LegacyReportCenter";
 import { SupportDialog, type SupportKind } from "@/components/SupportDialog";
 import { OfficeTxnPanel, type OfficeDocType } from "@/components/OfficeTxnPanel";
 import { formatLegacyMessage, type LegacyLanguage } from "@/lib/legacy-messages";
@@ -163,7 +164,8 @@ export function PosClassicClient({
   const [showStock, setShowStock] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showPrinter, setShowPrinter] = useState(false);
-  const [activeReport, setActiveReport] = useState<"hourly" | "items" | "history" | "stats" | null>(null);
+  const [activeReport, setActiveReport] = useState<"hourly" | "items" | "history" | "stats" | "center" | null>(null);
+  const [centerTab, setCenterTab] = useState<ReportCenterTab>("allstat");
   const [supportKind, setSupportKind] = useState<SupportKind | null>(null);
   const [officeTxnType, setOfficeTxnType] = useState<OfficeDocType | null>(null);
   const [showAbout, setShowAbout] = useState(false);
@@ -1069,7 +1071,15 @@ export function PosClassicClient({
         <button type="button" className={toolbarBtn} onClick={() => setActivePanel("manager")} title="經理">
           <span className="text-[18px]">👤</span>經理
         </button>
-        <button type="button" className={toolbarBtn} onClick={() => router.push("/backoffice/day-end")} title="營業數據">
+        <button
+          type="button"
+          className={toolbarBtn}
+          onClick={() => {
+            setCenterTab("allstat");
+            setActiveReport("center");
+          }}
+          title="營業數據"
+        >
           <span className="text-[18px]">📈</span>營業數據
         </button>
         <button type="button" className={toolbarBtn} onClick={() => setActivePanel("support")} title="支援">
@@ -1514,6 +1524,56 @@ export function PosClassicClient({
                 <button type="button" className={panelBtn} onClick={() => setActiveReport("stats")}>
                   營業統計 (會員/職員/分類)
                 </button>
+                <button
+                  type="button"
+                  className={panelBtn}
+                  onClick={() => {
+                    setCenterTab("shift");
+                    setActiveReport("center");
+                  }}
+                >
+                  每日交更及埋數報表
+                </button>
+                <button
+                  type="button"
+                  className={panelBtn}
+                  onClick={() => {
+                    setCenterTab("allstat");
+                    setActiveReport("center");
+                  }}
+                >
+                  萬用銷售統計 (fmAllStat)
+                </button>
+                <button
+                  type="button"
+                  className={panelBtn}
+                  onClick={() => {
+                    setCenterTab("cost");
+                    setActiveReport("center");
+                  }}
+                >
+                  成本及毛利報表 (10403)
+                </button>
+                <button
+                  type="button"
+                  className={panelBtn}
+                  onClick={() => {
+                    setCenterTab("stock_val");
+                    setActiveReport("center");
+                  }}
+                >
+                  存貨價值及變動報表 (10405/10407)
+                </button>
+                <button
+                  type="button"
+                  className={panelBtn}
+                  onClick={() => {
+                    setCenterTab("allstat");
+                    setActiveReport("center");
+                  }}
+                >
+                  營運通報表中心 (ReportG)
+                </button>
               </div>
             ) : null}
 
@@ -1903,6 +1963,9 @@ export function PosClassicClient({
       {activeReport === "items" ? <ItemReport onClose={() => setActiveReport(null)} /> : null}
       {activeReport === "history" ? <HistoryReport onClose={() => setActiveReport(null)} /> : null}
       {activeReport === "stats" ? <ManagerStatsReport onClose={() => setActiveReport(null)} /> : null}
+      {activeReport === "center" ? (
+        <LegacyReportCenter mode="modal" initialTab={centerTab} onClose={() => setActiveReport(null)} />
+      ) : null}
       {supportKind ? <SupportDialog kind={supportKind} shopId={storeContext?.legacySn ?? 1} terminalId={storeContext?.legacyMn ?? 1} onClose={() => setSupportKind(null)} /> : null}
       {showStock ? <StockPanel onClose={() => setShowStock(false)} /> : null}
       {showPassword ? <ChangePasswordDialog onClose={() => setShowPassword(false)} /> : null}

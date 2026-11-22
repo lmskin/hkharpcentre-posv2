@@ -10,3 +10,48 @@ body {
   color: var(--foreground);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
+
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 10mm;
+  }
+
+  body {
+    background: #ffffff !important;
+  }
+
+  .print-hide {
+    display: none !important;
+  }
+
+  .legacy-report-print-root {
+    position: static !important;
+    inset: auto !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+
+  .legacy-report-scroll {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  .legacy-report-table {
+    font-size: 10px !important;
+  }
+
+  .legacy-report-table thead {
+    display: table-header-group;
+  }
+
+  .legacy-report-table tr {
+    break-inside: avoid;
+  }
+}

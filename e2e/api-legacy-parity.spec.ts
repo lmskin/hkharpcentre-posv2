@@ -737,4 +737,182 @@ test.describe("Modules 1-12: Full-Stack API, Hardware Bridge & Legacy V47 Parity
     expect(workerOut.mysql.productCount).toBe(expectedProductCount);
     expect(workerOut.scheduledTasks).toHaveLength(4);
   });
+
+  test("Legacy Report Parity: All 11 ReportG & BOSMaint views, sub-totals, totals, & stock movement reconciliation", async ({
+    request,
+  }) => {
+    await loginApi(request, { pin: "000000" });
+    const repDate = "2099-12-29";
+
+    const supListJson = (await (await request.get("/api/suppliers")).json()) as {
+      suppliers: Array<{ legacyId: string; nameZh: string }>;
+    };
+    const sup = supListJson.suppliers[0]!;
+    expect(sup.legacyId).toBeTruthy();
+
+    // Opening float + Goods Receipt with supplierLegacyId + Retail Sale + Unpaid Invoice + Return + DayEnd Close
+    expect(
+      (await request.post("/api/day-end", { data: { action: "SET_FLOAT", businessDate: repDate, amountHkd: 1200 } })).status(),
+    ).toBe(200);
+
+    expect(
+      (
+        await request.post("/api/office-txn", {
+          data: {
+            clientIdempotencyKey: `e2e-rep-grc-${Date.now()}`,
+            docType: "GOODS_RECEIPT",
+            businessDateOverride: repDate,
+            supplierLegacyId: sup.legacyId,
+            reference: `${sup.legacyId} - ${sup.nameZh}`,
+            lines: [{ sku: "210810", nameZh: "CD", categoryC1: 0, quantity: 5, unitPriceHkd: 60 }],
+          },
+        })
+      ).status(),
+    ).toBe(201);
+
+    expect(
+      (
+        await request.post("/api/bills", {
+          data: {
+            clientIdempotencyKey: `e2e-rep-sl-${Date.now()}`,
+            docType: "RETAIL_SALE",
+            businessDateOverride: repDate,
+            lines: [{ sku: "210810", nameZh: "CD", categoryC1: 0, quantity: 2, unitPriceHkd: 113 }],
+            initialPayments: [{ clientIdempotencyKey: `e2e-rep-slp-${Date.now()}`, tenderCode: "CASH", amountHkd: 226 }],
+          },
+        })
+      ).status(),
+    ).toBe(201);
+
+    expect(
+      (
+        await request.post("/api/bills", {
+          data: {
+            clientIdempotencyKey: `e2e-rep-inv-${Date.now()}`,
+            docType: "SALES_INVOICE",
+            businessDateOverride: repDate,
+            lines: [{ sku: "210810", nameZh: "CD", categoryC1: 0, quantity: 1, unitPriceHkd: 113 }],
+            initialPayments: [],
+          },
+        })
+      ).status(),
+    ).toBe(201);
+
+    expect(
+      (
+        await request.post("/api/bills", {
+          data: {
+            clientIdempotencyKey: `e2e-rep-rtn-${Date.now()}`,
+            docType: "SALES_RETURN",
+            businessDateOverride: repDate,
+            lines: [{ sku: "210810", nameZh: "CD", categoryC1: 0, quantity: 1, unitPriceHkd: 50 }],
+            initialPayments: [{ clientIdempotencyKey: `e2e-rep-rtnp-${Date.now()}`, tenderCode: "CASH", amountHkd: 50 }],
+          },
+        })
+      ).status(),
+    ).toBe(201);
+
+    expect(
+      (
+        await request.post("/api/day-end", {
+          data: {
+            action: "CLOSE",
+            businessDate: repDate,
+            countedByTender: [{ tenderCode: "CASH", countedAmountHkd: 176 }],
+          },
+        })
+      ).status(),
+    ).toBe(201);
+
+    // 1. Hourly (24h + 4 periods + tenders)
+    const hourly = await (await request.get(`/api/reports?view=hourly&date=${repDate}`)).json();
+    expect(hourly.hours).toHaveLength(24);
+    expect(hourly.periods).toHaveLength(4);
+    expect(hourly.totalSalesHkd).toBe(289); // 226 + 113 - 50
+    expect(hourly.tenderTotals.CASH).toBe(176); // 226 - 50
+    expect(
+      Number(hourly.periods.reduce((s: number, p: { netSalesHkd: number }) => s + p.netSalesHkd, 0).toFixed(2)),
+    ).toBe(289);
+
+    // 2. Shift & Day-End (fmshiftreport)
+    const shift = await (await request.get(`/api/reports?view=shift&from=${repDate}&to=${repDate}&focusDate=${repDate}`)).json();
+    expect(shift.selectedBatch).not.toBeNull();
+    expect(shift.selectedBatch.openingFloatHkd).toBe(1200);
+    expect(shift.selectedBatch.issuedSalesHkd).toBe(289);
+    expect(shift.selectedBatch.unpaidArHkd).toBe(113);
+    expect(shift.detailTenders.some((t: { tenderCode: string; countedAmountHkd: number }) => t.tenderCode === "CASH" && t.countedAmountHkd === 176)).toBe(true);
+
+    // 3. Item Sales Report with cost & stock
+    const items = await (await request.get(`/api/reports?view=items&from=${repDate}&to=${repDate}`)).json();
+    expect(items.totalSalesHkd).toBe(289);
+    const cdItem = items.items.find((i: { sku: string }) => i.sku === "210810");
+    expect(cdItem).toBeDefined();
+    expect(cdItem.quantity).toBe(2); // 2 + 1 - 1
+    expect(cdItem.grossSalesHkd).toBe(289);
+
+    // 4. History (day + month granularities)
+    const histDay = await (await request.get(`/api/reports?view=history&from=${repDate}&to=${repDate}&granularity=day`)).json();
+    expect(histDay.totals.netSalesHkd).toBe(289);
+    expect(histDay.totals.returnHkd).toBe(50);
+    expect(histDay.totals.cashHkd).toBe(176);
+
+    const histMonth = await (await request.get(`/api/reports?view=history&from=${repDate}&to=${repDate}&granularity=month`)).json();
+    expect(histMonth.days[0].periodKey).toBe("2099-12");
+
+    // 5. All Purpose Statistics (fmAllStat)
+    for (const grp of ["category", "product", "tender", "doctype", "supplier"] as const) {
+      const stat = await (
+        await request.get(`/api/reports?view=allstat&from=${repDate}&to=${repDate}&groupBy=${grp}&dateBucket=day`)
+      ).json();
+      expect(stat.rows.length).toBeGreaterThan(0);
+      expect(stat.subTotals.length).toBeGreaterThan(0);
+    }
+
+    // 6. BOS 10403 Cost Report
+    const cost = await (
+      await request.get(`/api/reports?view=cost&from=${repDate}&to=${repDate}&dmy=month&showShop=1&showCategory=1&showUbc=1`)
+    ).json();
+    expect(cost.totals.salesNetHkd).toBe(289);
+    expect(cost.totals.salesRspHkd).toBe(289);
+    expect(cost.rows.length).toBeGreaterThan(0);
+
+    // 7. BOS 10405 Stock Value, Last Sale, Reorder
+    const stockVal = await (await request.get("/api/reports?view=stock_val&subView=valuation&positiveOnly=0&limit=2500")).json();
+    expect(stockVal.rows.length).toBeGreaterThanOrEqual(1983);
+    const stockReorder = await (await request.get("/api/reports?view=stock_val&subView=reorder&threshold=5&positiveOnly=0&limit=50")).json();
+    expect(stockReorder.rows.length).toBeGreaterThan(0);
+
+    // 8. BOS 10407 Stock Movement Matrix & Reconciliation
+    const mov = await (await request.get(`/api/reports?view=movement&from=${repDate}&to=${repDate}`)).json();
+    expect(mov.rows.length).toBeGreaterThan(0);
+    for (const r of mov.rows as Array<{ openingQty: number; netDeltaQty: number; closingQty: number }>) {
+      expect(Math.abs(r.openingQty + r.netDeltaQty - r.closingQty)).toBeLessThan(0.001);
+    }
+    const cdMov = mov.rows.find((r: { sku: string }) => r.sku === "210810");
+    expect(cdMov.inGrcQty).toBe(5);
+    expect(cdMov.inRtnQty).toBe(1);
+    expect(cdMov.outSaleQty).toBe(-3);
+
+    // 9. Check Ledger (headers / lines / payments + AR aging)
+    const chkHdr = await (await request.get(`/api/reports?view=check_ledger&subView=headers&from=${repDate}&to=${repDate}`)).json();
+    expect(chkHdr.totals.count).toBeGreaterThanOrEqual(4); // GRC + SL + INV + RTN
+    const chkLines = await (await request.get(`/api/reports?view=check_ledger&subView=lines&from=${repDate}&to=${repDate}`)).json();
+    expect(chkLines.totals.lineTotalHkd).toBe(589); // 300 (GRC) + 226 (SL) + 113 (INV) - 50 (RTN)
+    const chkRetailLines = await (await request.get(`/api/reports?view=check_ledger&subView=lines&docType=RETAIL_SALE&from=${repDate}&to=${repDate}`)).json();
+    expect(chkRetailLines.totals.lineTotalHkd).toBe(226);
+    const chkPmt = await (await request.get(`/api/reports?view=check_ledger&subView=payments&from=${repDate}&to=${repDate}`)).json();
+    expect(chkPmt.arAgingBuckets).toHaveLength(4);
+    expect(chkPmt.totals.amountHkd).toBe(176);
+
+    // 10. Other Transactions (OfficeXHeader / lines / stocktake)
+    const offHdr = await (await request.get(`/api/reports?view=office_tx&subView=headers&from=${repDate}&to=${repDate}`)).json();
+    expect(offHdr.rows.some((r: { supplierCode: string; docType: string }) => r.docType === "GOODS_RECEIPT" && r.supplierCode === sup.legacyId)).toBe(true);
+    const offSt = await (await request.get(`/api/reports?view=office_tx&subView=stocktake&from=2000-01-01&to=2099-12-31`)).json();
+    expect(offSt.totals).toBeDefined();
+
+    // 11. Manager Stats (including supplierStats & activityLogs)
+    const mgrStats = await (await request.get(`/api/reports?view=stats&from=${repDate}&to=${repDate}`)).json();
+    expect(mgrStats.supplierStats.some((s: { legacyId: string; grcCount: number }) => s.legacyId === sup.legacyId && s.grcCount >= 1)).toBe(true);
+    expect(mgrStats.activityLogs.length).toBeGreaterThan(0);
+  });
 });

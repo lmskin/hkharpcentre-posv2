@@ -19,6 +19,7 @@ const OfficeTxnSchema = z.object({
     "PETTY_PAYOUT",
   ]),
   businessDateOverride: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  supplierLegacyId: z.string().trim().max(32).optional(),
   reference: z.string().trim().max(180).default(""),
   notes: z.string().trim().max(300).default(""),
   lines: z.array(z.object({
@@ -72,6 +73,7 @@ export async function POST(request: Request) {
       docType: input.docType,
       businessDateOverride: input.businessDateOverride,
       sourceTable: "OfficeXHeader",
+      legacySc: input.supplierLegacyId || null,
       lines: input.lines.map((line) => ({
         ...line,
         stockQuantity: input.docType === "STOCK_ADJUSTMENT" ? line.quantity * line.adjustmentDirection : line.quantity,

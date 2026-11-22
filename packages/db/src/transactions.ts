@@ -98,6 +98,7 @@ export interface CreateBillOrInvoiceTxInput {
   createDeliveryOrder?: boolean;
   businessDateOverride?: string;
   sourceTable?: "POS_V2" | "OfficeXHeader";
+  legacySc?: string | null;
   customerId?: number;
   lines: Array<{
     sku: string;
@@ -255,6 +256,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
       invoiceNo,
       docType: input.docType,
       sourceTable: input.sourceTable ?? (OFFICE_ONLY_DOC_TYPES.includes(input.docType) || input.docType === "PETTY_PAYOUT" ? "OfficeXHeader" : "POS_V2"),
+      legacySc: input.legacySc ?? null,
       legacyXc: xc,
       legacyXt: xt,
       legacySd: sd,

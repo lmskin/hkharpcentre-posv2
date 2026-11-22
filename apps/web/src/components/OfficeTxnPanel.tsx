@@ -79,7 +79,20 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
     if (!valid || completedNo) return;
     setBusy(true); setMessage("");
     try {
-      const res = await fetch("/api/office-txn", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientIdempotencyKey: `office-${crypto.randomUUID()}`, docType, reference, notes, lines }) });
+      const supplierLegacyId =
+        docType === "GOODS_RECEIPT" || docType === "PURCHASE_RETURN" ? selectedSupplier || undefined : undefined;
+      const res = await fetch("/api/office-txn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientIdempotencyKey: `office-${crypto.randomUUID()}`,
+          docType,
+          supplierLegacyId,
+          reference,
+          notes,
+          lines,
+        }),
+      });
       const data = (await res.json()) as { invoiceNo?: string; error?: string };
       if (!res.ok) throw new Error(data.error ?? "其他交易儲存失敗");
       setCompletedNo(data.invoiceNo ?? ""); setMessage(`單據 ${data.invoiceNo} 已完成並落庫`);
@@ -103,7 +116,8 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
                 onChange={(e) => {
                   const val = e.target.value;
                   setSelectedSupplier(val);
-                  if (val) setReference(val);
+                  const sup = suppliers.find((s) => s.legacyId === val);
+                  if (sup) setReference(`${sup.legacyId} - ${sup.nameZh || sup.nameEn}`);
                 }}
                 className={`${input} ml-1 w-48`}
               >
@@ -111,7 +125,7 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
                 {suppliers.map((s) => {
                   const label = `${s.legacyId} - ${s.nameZh || s.nameEn}`;
                   return (
-                    <option key={s.id} value={label}>
+                    <option key={s.id} value={s.legacyId}>
                       {label}
                     </option>
                   );

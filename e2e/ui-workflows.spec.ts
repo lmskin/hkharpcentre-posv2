@@ -277,7 +277,8 @@ test.describe("UI Workflows: Classic POS, AR Invoices & Back Office (Real Chrome
     await expect(page.getByText("Catalog Masters")).toBeVisible();
 
     await page.goto("/backoffice/reports");
-    await expect(page.getByText("Operational & Financial Reports")).toBeVisible();
+    await expect(page.getByText(/營運通報表中心/)).toBeVisible();
+    await expect(page.getByText(/營運通報表\s+版權©2001-2009。/)).toBeVisible();
 
     await page.goto("/backoffice/settings");
     await expect(page.getByText("Invoice & Terminal Settings")).toBeVisible();
@@ -404,5 +405,49 @@ test.describe("UI Workflows: Classic POS, AR Invoices & Back Office (Real Chrome
     await expect(page.getByText(/歡迎再次光臨/)).toBeVisible();
     await page.getByRole("button", { name: "A4 Formal Invoice" }).click();
     await expect(page.getByText("Bank Transfer Payment Instructions")).toBeVisible();
+  });
+
+  test("UI 7: Legacy Report Center (ReportG / BOSMaint) via POS 營業數據 & /backoffice/reports", async ({
+    page,
+  }) => {
+    await loginThroughUi(page, "000000");
+
+    // 1. Top toolbar 營業數據 opens 營運通報表中心 modal in POS without leaving /pos
+    await page.locator('button[title="營業數據"]').click();
+    const centerDlg = page.getByRole("dialog", { name: "營運通報表中心" });
+    await expect(centerDlg).toBeVisible();
+    await expect(centerDlg.getByText(/編印 Printed:/)).toBeVisible();
+    await expect(centerDlg.getByText(/營運通報表\s+版權©2001-2009。/)).toBeVisible();
+
+    // Switch through all legacy report tabs inside the ReportG workbench
+    for (const tabName of [
+      "每日時飛 (時報)",
+      "每日交更埋數",
+      "項目銷售 (項報)",
+      "歷史營業及月計",
+      "10403 成本報表",
+      "10405 存貨價值/呆貨",
+      "10407 存貨變動",
+      "查單/收款/AR帳齡",
+      "其他交易及盤點",
+      "會員/職員/供應商/日誌",
+    ]) {
+      await centerDlg.getByRole("button", { name: tabName, exact: true }).click();
+      await expect(centerDlg.getByText(/總計|AR 帳齡|盤點紀錄|活動日誌/).first()).toBeVisible();
+    }
+
+    await centerDlg.getByRole("button", { name: "離開" }).click();
+    await expect(centerDlg).not.toBeVisible();
+
+    // 2. Back Office /backoffice/reports hosts full legacy workbench & clean CSV export
+    await page.goto("/backoffice/reports");
+    await page.getByRole("button", { name: "10403 成本報表", exact: true }).click();
+    await expect(page.getByText("原價銷售額 SalesRSP")).toBeVisible();
+    await expect(page.getByText("平均成本 CostAV")).toBeVisible();
+    const [costDl] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "匯出 CSV" }).click(),
+    ]);
+    expect(costDl.suggestedFilename()).toMatch(/^bos-cost-10403-/);
   });
 });
