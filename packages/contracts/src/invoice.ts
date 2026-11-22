@@ -6,6 +6,7 @@ export const BillStatusSchema = z.enum([
   "held",
   "intraday",
   "completed",
+  "sealed",
   "cancelled",
 ]);
 export type BillStatus = z.infer<typeof BillStatusSchema>;
@@ -19,10 +20,18 @@ export const PaymentStatusSchema = z.enum([
 export type PaymentStatus = z.infer<typeof PaymentStatusSchema>;
 
 export const BillDocTypeSchema = z.enum([
-  "RETAIL_SALE",    // Legacy XC=99 (SL)
-  "SALES_INVOICE",  // Formal Invoice issued upfront, settled later by Bank Transfer (replaces XC=23/22 + PM=8)
-  "SALES_RETURN",   // Legacy XC=9 (RS)
-  "PETTY_PAYOUT",   // Legacy XC=12 (PM)
+  "RETAIL_SALE",        // Legacy XC=99 (SL)
+  "SALES_INVOICE",      // Formal Invoice issued upfront, settled later by Bank Transfer (replaces XC=23/22 + PM=8)
+  "SALES_RETURN",       // Legacy XC=9 (RS)
+  "PETTY_PAYOUT",       // Legacy XC=12 (PM)
+  "GOODS_RECEIPT",      // Legacy XC=1
+  "PURCHASE_RETURN",    // Legacy XC=4
+  "STOCK_TRANSFER_OUT", // Legacy XC=13
+  "STOCK_TRANSFER_IN",  // Legacy XC=14
+  "WRITE_OFF",          // Legacy XC=10
+  "STOCK_ADJUSTMENT",   // Legacy XC=15
+  "STOCKTAKE",          // Legacy XC=93
+  "CRM_POINT_TXN",      // Legacy XC=54
 ]);
 export type BillDocType = z.infer<typeof BillDocTypeSchema>;
 
@@ -48,8 +57,12 @@ export type BillLineInput = z.infer<typeof BillLineInputSchema>;
 export const IssueBillOrInvoiceInputSchema = z.object({
   clientIdempotencyKey: z.string().min(8).max(64),
   shopId: z.number().int().nonnegative().default(1),
-  terminalId: z.number().int().positive().default(1),
+  terminalId: z.number().int().positive().optional(),
   docType: BillDocTypeSchema,
+  status: z.enum(["completed", "held"]).default("completed"),
+  supersedeInvoiceNo: z.string().trim().min(1).max(40).optional(),
+  createDeliveryOrder: z.boolean().default(false),
+  businessDateOverride: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   customerId: z.number().int().positive().optional(),
   customerCurrentPoints: z.number().int().nonnegative().default(0),
   lines: z.array(BillLineInputSchema).min(1),

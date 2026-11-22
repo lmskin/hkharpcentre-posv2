@@ -5,16 +5,16 @@ import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [mode, setMode] = useState<"pin" | "password">("pin");
+  const [mode, setMode] = useState<"password" | "pin">("password");
   const [pin, setPin] = useState("");
   const [staffCode, setStaffCode] = useState("5002");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ code: string; text: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  async function submitLogin(e: React.FormEvent) {
-    e.preventDefault();
-    setError("");
+  async function submitLogin(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
     setSubmitting(true);
     try {
       const payload = mode === "pin" ? { pin } : { staffCode, password };
@@ -23,121 +23,55 @@ export default function LoginPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = (await res.json()) as { ok?: boolean; error?: string };
+      const data = (await res.json()) as { ok?: boolean; error?: string; code?: string };
       if (!res.ok) {
-        setError(data.error ?? "Login failed");
+        setError({ code: data.code ?? "003", text: data.error ?? "員工編號或密碼錯誤" });
         return;
       }
       router.push("/pos");
       router.refresh();
+    } catch {
+      setError({ code: "999", text: "伺服器離線，請稍後再試" });
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <div className="mx-auto max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xs">
-      <h1 className="text-lg font-bold text-slate-900">Staff Authentication</h1>
-      <p className="mt-1 text-xs text-slate-500">
-        Sign in with your 6-digit POS terminal PIN or Back Office password.
-      </p>
-
-      <div className="mt-4 flex gap-2 text-xs font-medium">
-        <button
-          type="button"
-          onClick={() => setMode("pin")}
-          className={`flex-1 rounded-lg border py-2 ${
-            mode === "pin" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 text-slate-700"
-          }`}
-        >
-          6-Digit POS PIN
-        </button>
-        <button
-          type="button"
-          onClick={() => setMode("password")}
-          className={`flex-1 rounded-lg border py-2 ${
-            mode === "password" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 text-slate-700"
-          }`}
-        >
-          Staff ID &amp; Password
-        </button>
-      </div>
-
-      <form onSubmit={submitLogin} className="mt-4 space-y-4">
-        {mode === "pin" ? (
-          <div>
-            <label className="block text-xs font-medium text-slate-600">POS PIN</label>
-            <input
-              type="password"
-              inputMode="numeric"
-              maxLength={6}
-              value={pin}
-              onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-              placeholder="Enter 6-digit PIN"
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-center font-mono text-lg tracking-widest"
-              required
-            />
-            <div className="mt-2 grid grid-cols-3 gap-1.5 font-mono text-sm">
-              {["1", "2", "3", "4", "5", "6", "7", "8", "9", "Clear", "0", "Del"].map((key) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => {
-                    if (key === "Clear") setPin("");
-                    else if (key === "Del") setPin((p) => p.slice(0, -1));
-                    else setPin((p) => (p.length < 6 ? p + key : p));
-                  }}
-                  className="rounded border border-slate-200 py-2 hover:bg-slate-100"
-                >
-                  {key}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <>
-            <div>
-              <label className="block text-xs font-medium text-slate-600">Staff ID</label>
-              <input
-                value={staffCode}
-                onChange={(e) => setStaffCode(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-600">Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                required
-              />
-            </div>
-          </>
-        )}
-
-        {error ? (
-          <div className="rounded-lg bg-rose-50 px-3 py-2 text-xs font-medium text-rose-800">{error}</div>
-        ) : null}
-
-        <button
-          type="submit"
-          disabled={submitting}
-          className="w-full rounded-lg bg-indigo-600 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:bg-slate-300"
-        >
-          {submitting ? "Signing in..." : "Sign In"}
-        </button>
-      </form>
-
-      {process.env.NODE_ENV !== "production" ? (
-        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-900">
-          <div className="font-semibold">Onboarding Dev Credentials:</div>
-          <div>Admin (L5 · ID 5002): PIN <span className="font-mono">000000</span></div>
-          <div>Cashier (L1 · ID 101): PIN <span className="font-mono">111111</span></div>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[#316ac5] p-4 font-[Tahoma,'Microsoft_JhengHei',sans-serif]">
+      <div className="w-[410px] border border-[#0a246a] bg-[#f0f0f0] shadow-[8px_8px_20px_rgba(0,0,0,0.45)]">
+        <div className="flex items-center justify-between bg-gradient-to-r from-[#0a246a] to-[#a6caf0] px-3 py-2 text-white">
+          <span className="text-[13px] font-bold">營運通 - 零售系統</span>
+          <span className="text-[11px]">frmLogin1</span>
         </div>
-      ) : null}
+        <div className="p-6">
+          <div className="mb-5 text-center">
+            <div className="text-[28px] font-bold italic text-[#2e7ec2]">eRun</div>
+            <div className="text-[13px] font-bold text-black">POSGV3.3 678</div>
+            <div className="mt-1 text-[12px] text-[#444]">香港豎琴中心 · 收銀員登入</div>
+          </div>
+          <div className="mb-4 flex border border-[#7f9db9] text-[12px]">
+            <button type="button" onClick={() => { setMode("password"); setError(null); }} className={`flex-1 px-3 py-1 ${mode === "password" ? "bg-[#316ac5] text-white" : "bg-[#f0f0f0] text-black"}`}>員工編號 / 密碼</button>
+            <button type="button" onClick={() => { setMode("pin"); setError(null); }} className={`flex-1 border-l border-[#7f9db9] px-3 py-1 ${mode === "pin" ? "bg-[#316ac5] text-white" : "bg-[#f0f0f0] text-black"}`}>六位收銀密碼</button>
+          </div>
+          <form onSubmit={(event) => void submitLogin(event)} className="space-y-3 text-[12px] text-black">
+            {mode === "password" ? (
+              <>
+                <label className="grid grid-cols-[90px_1fr] items-center">員工編號<input autoFocus value={staffCode} onChange={(event) => setStaffCode(event.target.value)} className="border border-[#7f9db9] bg-white px-2 py-1.5 font-mono text-[14px]" required /></label>
+                <label className="grid grid-cols-[90px_1fr] items-center">密碼<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} className="border border-[#7f9db9] bg-white px-2 py-1.5 font-mono text-[14px]" required /></label>
+              </>
+            ) : (
+              <label className="grid grid-cols-[90px_1fr] items-center">收銀密碼<input autoFocus type="password" inputMode="numeric" maxLength={6} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, ""))} className="border border-[#7f9db9] bg-white px-2 py-1.5 text-center font-mono text-[18px] tracking-[0.5em]" required /></label>
+            )}
+            {error ? <div role="alert" className="border border-[#c00000] bg-[#ffffe1] p-2"><div className="font-bold text-[#2e7ec2]">營運通訊息 - {error.code}</div><div className="mt-1 font-bold text-[#c00000]">{error.text}</div></div> : null}
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="submit" disabled={submitting} className="border border-[#7f9db9] bg-[#e1dfff] px-7 py-1.5 text-[12px] text-black hover:bg-[#d0ccff] disabled:opacity-40">{submitting ? "登入中…" : "確定"}</button>
+              <button type="button" onClick={() => router.push("/")} className="border border-[#7f9db9] bg-[#f0f0f0] px-7 py-1.5 text-[12px] text-black hover:bg-[#e5e1d5]">離開</button>
+            </div>
+          </form>
+          {process.env.NODE_ENV !== "production" ? <div className="mt-5 border-t border-[#d4d0c8] pt-3 text-center text-[10px] text-[#666]">開發帳號：5002 / PIN 000000 · 收銀員：101 / PIN 111111</div> : null}
+        </div>
+      </div>
     </div>
   );
 }

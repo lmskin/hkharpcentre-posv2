@@ -32,10 +32,34 @@ async function execBatchUpsert(
 }
 
 function mapXcToDocType(xc: number): string {
-  if (xc === 23 || xc === 22) return "SALES_INVOICE";
-  if (xc === 9) return "SALES_RETURN";
-  if (xc === 12) return "PETTY_PAYOUT";
-  return "RETAIL_SALE";
+  switch (xc) {
+    case 1:
+      return "GOODS_RECEIPT";
+    case 4:
+      return "PURCHASE_RETURN";
+    case 9:
+      return "SALES_RETURN";
+    case 10:
+      return "WRITE_OFF";
+    case 12:
+      return "PETTY_PAYOUT";
+    case 13:
+      return "STOCK_TRANSFER_OUT";
+    case 14:
+      return "STOCK_TRANSFER_IN";
+    case 15:
+      return "STOCK_ADJUSTMENT";
+    case 22:
+    case 23:
+      return "SALES_INVOICE";
+    case 54:
+      return "CRM_POINT_TXN";
+    case 93:
+      return "STOCKTAKE";
+    case 99:
+    default:
+      return "RETAIL_SALE";
+  }
 }
 
 function clampStr(val: string | null | undefined, maxLen: number): string {

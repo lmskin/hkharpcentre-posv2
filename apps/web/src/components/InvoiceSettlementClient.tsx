@@ -32,9 +32,9 @@ export function InvoiceSettlementClient({
   const [statusFilter, setStatusFilter] = useState<"open" | "paid" | "all">("open");
   const [searchQ, setSearchQ] = useState("");
   const [selectedNo, setSelectedNo] = useState<string>(initialInvoices[0]?.invoiceNo ?? "");
-  const [tenderCode, setTenderCode] = useState<"BANK_XFER" | "CHEQUE" | "CASH" | "VISA" | "MASTERCARD">(
-    "BANK_XFER",
-  );
+  const [tenderCode, setTenderCode] = useState<
+    "BANK_XFER" | "CHEQUE" | "CASH" | "VISA" | "MASTERCARD" | "UNIONPAY" | "AMEX"
+  >("BANK_XFER");
   const [amountInput, setAmountInput] = useState<string>("");
   const [referenceNo, setReferenceNo] = useState<string>("");
   const [feedback, setFeedback] = useState<string>("");
@@ -213,7 +213,7 @@ export function InvoiceSettlementClient({
                   value={tenderCode}
                   onChange={(e) =>
                     setTenderCode(
-                      e.target.value as "BANK_XFER" | "CHEQUE" | "CASH" | "VISA" | "MASTERCARD",
+                      e.target.value as "BANK_XFER" | "CHEQUE" | "CASH" | "VISA" | "MASTERCARD" | "UNIONPAY" | "AMEX",
                     )
                   }
                   className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
@@ -222,6 +222,8 @@ export function InvoiceSettlementClient({
                   <option value="CHEQUE">Cheque (PM=7)</option>
                   <option value="VISA">Visa Standalone (PM=2)</option>
                   <option value="MASTERCARD">MasterCard Standalone (PM=3)</option>
+                  <option value="UNIONPAY">UnionPay Standalone (PM=4)</option>
+                  <option value="AMEX">AMEX Standalone (PM=6)</option>
                   <option value="CASH">Cash (PM=0)</option>
                 </select>
               </div>

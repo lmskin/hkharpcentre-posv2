@@ -64,6 +64,13 @@ async function main() {
       { docType: "SALES_INVOICE", nextSeq: 20001 },
       { docType: "SALES_RETURN", nextSeq: 1001 },
       { docType: "PETTY_PAYOUT", nextSeq: 2001 },
+      { docType: "GOODS_RECEIPT", nextSeq: 1001 },
+      { docType: "PURCHASE_RETURN", nextSeq: 1001 },
+      { docType: "STOCK_TRANSFER_OUT", nextSeq: 1001 },
+      { docType: "STOCK_TRANSFER_IN", nextSeq: 1001 },
+      { docType: "WRITE_OFF", nextSeq: 2001 },
+      { docType: "STOCK_ADJUSTMENT", nextSeq: 1001 },
+      { docType: "STOCKTAKE", nextSeq: 1001 },
     ];
     await pool.query("CREATE TABLE IF NOT EXISTS bill_sequences_tmp LIKE bill_sequences");
     await pool.query("DROP TABLE IF EXISTS bill_sequences_tmp");

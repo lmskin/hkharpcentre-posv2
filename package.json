@@ -15,9 +15,10 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:golden": "npm --workspace @hkharp/domain run test:golden",
+    "test:e2e": "playwright test",
     "build": "npm --workspace @hkharp/web run build && npm --workspace @hkharp/worker run typecheck",
     "build:bridge": "dotnet build apps/pos-hardware-bridge/PosHardwareBridge.csproj -c Release",
-    "dev": "npm --workspace @hkharp/web run dev",
+    "dev": "npm --workspace @hkharp/web run dev --",
     "db:generate": "npm --workspace @hkharp/db run db:generate",
     "db:migrate": "node --env-file=.env ./node_modules/tsx/dist/cli.mjs packages/db/src/migrate.ts",
     "db:seed": "node --env-file=.env ./node_modules/tsx/dist/cli.mjs packages/db/src/seed-operational.ts",
@@ -26,6 +27,7 @@
     "etl:verify": "node --env-file=.env ./node_modules/tsx/dist/cli.mjs packages/etl/src/verify-v47.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@types/node": "^22.13.10",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",

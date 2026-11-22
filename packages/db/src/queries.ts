@@ -1,14 +1,27 @@
-import { and, desc, eq, inArray, like, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, like, ne, or, sql } from "drizzle-orm";
 import type mysql from "mysql2/promise";
 import { createDb, type HarpDb } from "./client";
 import { verifySecret } from "./auth";
-import { auditLogs, shops, staff, staffRoles } from "./schema/org-auth";
+import { auditLogs, shops, staff, staffRoles, terminals } from "./schema/org-auth";
 import { categories, posMenuButtons, posMenus, products, units } from "./schema/catalog";
-import { crmPointLedger, customers } from "./schema/crm";
-import { billLines, bills } from "./schema/sales-ar";
+import { crmPointLedger, customerGrades, customers } from "./schema/crm";
+import { billLines, bills, deliveryOrders } from "./schema/sales-ar";
 import { billPayments } from "./schema/payments";
-import { appSettings, dayEndBatches, stockBalances } from "./schema/stock-ops";
+import { appSettings, dayEndBatches, stockBalances, stockMovements } from "./schema/stock-ops";
 import { formatHktBusinessDate } from "./transactions";
+
+const SALES_DOC_TYPES = ["RETAIL_SALE", "SALES_INVOICE", "SALES_RETURN"] as const;
+
+export interface ActiveStoreContext {
+  shopId: number;
+  legacySn: number;
+  shopCode: string;
+  shopNameZh: string;
+  shopNameEn: string;
+  terminalId: number;
+  legacyMn: number;
+  terminalName: string;
+}
 
 let sharedConn: { db: HarpDb; pool: mysql.Pool; url: string } | null = null;
 
@@ -92,6 +105,55 @@ export async function pingMySqlHealth(): Promise<MySqlHealthStatus> {
   }
 }
 
+export async function resolveActiveStoreContext(
+  preferredShopSn?: number,
+  preferredTerminalMn?: number,
+): Promise<ActiveStoreContext> {
+  const conn = requireSharedDb();
+  const targetSn = preferredShopSn ?? Number(process.env.SHOP_ID ?? "1");
+  const targetMn = preferredTerminalMn ?? Number(process.env.TERMINAL_ID ?? "1");
+
+  const shopRows = await conn.db.select().from(shops).where(eq(shops.active, true)).orderBy(shops.legacySn, shops.id);
+  const activeShop =
+    shopRows.find((s) => s.legacySn === targetSn) ??
+    shopRows.find((s) => s.legacySn > 0) ??
+    shopRows[0];
+
+  if (!activeShop) {
+    return {
+      shopId: 1,
+      legacySn: 1,
+      shopCode: "CENTRAL",
+      shopNameZh: "中環門市",
+      shopNameEn: "Central",
+      terminalId: 1,
+      legacyMn: 1,
+      terminalName: "Counter 1-1",
+    };
+  }
+
+  const termRows = await conn.db
+    .select()
+    .from(terminals)
+    .where(eq(terminals.shopId, activeShop.id))
+    .orderBy(terminals.legacyMn, terminals.id);
+  const activeTerminal =
+    termRows.find((t) => t.legacyMn === targetMn && t.active) ??
+    termRows.find((t) => t.active) ??
+    termRows[0];
+
+  return {
+    shopId: activeShop.id,
+    legacySn: activeShop.legacySn,
+    shopCode: activeShop.code,
+    shopNameZh: activeShop.nameZh,
+    shopNameEn: activeShop.nameEn,
+    terminalId: activeTerminal?.id ?? 1,
+    legacyMn: activeTerminal?.legacyMn ?? 1,
+    terminalName: activeTerminal?.name ?? `Counter ${activeShop.legacySn}-${targetMn}`,
+  };
+}
+
 export async function authenticateStaff(params: {
   staffCode?: string;
   password?: string;
@@ -118,22 +180,57 @@ export async function authenticateStaff(params: {
     const pinMatch = params.pin ? verifySecret(params.pin, r.pinHash) : false;
     const pwMatch = params.password && params.staffCode ? verifySecret(params.password, r.passwordHash) : false;
     if (pinMatch || pwMatch) {
+      const [staffShop] = await conn.db
+        .select({ legacySn: shops.legacySn })
+        .from(shops)
+        .where(eq(shops.id, r.shopId))
+        .limit(1);
+      const storeCtx = await resolveActiveStoreContext();
+      const resolvedShopId = staffShop?.legacySn === 0 ? storeCtx.shopId : r.shopId;
       return {
         staffId: r.id,
         legacyId: r.legacyId ?? String(r.id),
         displayName: r.displayName,
         roleLevel: r.roleLevel,
-        shopId: r.shopId,
+        shopId: resolvedShopId,
       };
     }
   }
   return null;
 }
 
+export async function authorizeManagerOverride(managerPin: string, minRoleLevel = 4) {
+  const clean = managerPin.trim();
+  if (!clean) return null;
+  const user = await authenticateStaff({ pin: clean });
+  if (!user || user.roleLevel < minRoleLevel) return null;
+  return user;
+}
+
+export async function recordLoginAudit(input: {
+  staffId?: number;
+  shopId?: number;
+  staffCode?: string;
+  mode: "pin" | "password";
+  success: boolean;
+}) {
+  const conn = getSharedDb();
+  if (!conn) return;
+  await conn.db.insert(auditLogs).values({
+    shopId: input.shopId ?? 0,
+    staffId: input.staffId ?? null,
+    action: input.success ? "LOGIN_SUCCESS" : "LOGIN_FAILED",
+    entityType: "staff",
+    entityId: input.staffCode ?? input.staffId?.toString() ?? "PIN",
+    details: { mode: input.mode },
+  });
+}
+
 export async function getDashboardSummary() {
   const conn = getSharedDb();
   if (!conn) return null;
   const today = formatHktBusinessDate();
+  const storeCtx = await resolveActiveStoreContext();
 
   const [countsRow] = await conn.db
     .select({
@@ -142,8 +239,8 @@ export async function getDashboardSummary() {
       billCount: sql<number>`(SELECT COUNT(*) FROM bills)`,
       openArCount: sql<number>`(SELECT COUNT(*) FROM bills WHERE payment_status IN ('unpaid','partial') AND balance_due > 0 AND status <> 'cancelled')`,
       openArTotal: sql<string>`(SELECT COALESCE(SUM(balance_due), 0) FROM bills WHERE payment_status IN ('unpaid','partial') AND balance_due > 0 AND status <> 'cancelled')`,
-      todayIssuedSales: sql<string>`(SELECT COALESCE(SUM(net_amount), 0) FROM bills WHERE business_date = ${today} AND status <> 'cancelled')`,
-      todayCollectedPayments: sql<string>`(SELECT COALESCE(SUM(amount), 0) FROM bill_payments WHERE business_date = ${today} AND voided = 0)`,
+      todayIssuedSales: sql<string>`(SELECT COALESCE(SUM(CASE WHEN doc_type = 'SALES_RETURN' THEN -net_amount ELSE net_amount END), 0) FROM bills WHERE shop_id = ${storeCtx.shopId} AND business_date = ${today} AND status <> 'cancelled' AND doc_type IN ('RETAIL_SALE','SALES_INVOICE','SALES_RETURN'))`,
+      todayCollectedPayments: sql<string>`(SELECT COALESCE(SUM(CASE WHEN b.doc_type IN ('SALES_RETURN','PETTY_PAYOUT') THEN -bp.amount ELSE bp.amount END), 0) FROM bill_payments bp JOIN bills b ON b.id = bp.bill_id WHERE b.shop_id = ${storeCtx.shopId} AND bp.business_date = ${today} AND bp.voided = 0 AND b.status <> 'cancelled')`,
     })
     .from(shops)
     .limit(1);
@@ -168,12 +265,15 @@ export async function listCatalogProducts(limit = 60) {
     .select({
       id: products.id,
       sku: products.barcode,
+      ubc: products.ubc,
       nameZh: products.nameZh,
       nameEn: products.nameEn,
       categoryC1: products.legacyC1,
       categoryNameEn: categories.nameEn,
       sellPrice: products.sellPrice,
+      fixedPrice: products.fixedPrice,
       avgCost: products.avgCost,
+      allowItemDiscount: products.allowItemDiscount,
       excludeFromCrmBonus: products.excludeFromCrmBonus,
       active: products.active,
     })
@@ -186,26 +286,37 @@ export async function listCatalogProducts(limit = 60) {
   return rows.map((r) => ({
     id: r.id,
     sku: r.sku,
+    ubc: r.ubc,
     nameZh: r.nameZh,
     nameEn: r.nameEn || r.nameZh,
     categoryLabel: `${r.categoryNameEn ?? "General"} (C1=${r.categoryC1})`,
     categoryC1: r.categoryC1,
     unitPriceHkd: Number(r.sellPrice),
     avgCostHkd: Number(r.avgCost),
+    allowItemDiscount: r.allowItemDiscount,
+    isFixedPrice: r.fixedPrice !== null,
     excludeFromCrmBonus: r.excludeFromCrmBonus,
     active: r.active,
   }));
 }
 
-export async function searchProducts(params: { q?: string; categoryC1?: number; limit?: number }) {
+export async function searchProducts(params: { q?: string; categoryC1?: number; limit?: number; offset?: number }) {
   const conn = requireSharedDb();
   const q = params.q?.trim();
   const limit = Math.min(params.limit ?? 60, 200);
+  const offset = Math.max(0, params.offset ?? 0);
 
   const filters = [];
   if (q) {
     const pattern = `%${q}%`;
-    filters.push(or(like(products.barcode, pattern), like(products.nameEn, pattern), like(products.nameZh, pattern)));
+    filters.push(
+      or(
+        like(products.barcode, pattern),
+        like(products.ubc, pattern),
+        like(products.nameEn, pattern),
+        like(products.nameZh, pattern),
+      ),
+    );
   }
   if (params.categoryC1 !== undefined && Number.isFinite(params.categoryC1)) {
     filters.push(eq(products.legacyC1, params.categoryC1));
@@ -221,7 +332,9 @@ export async function searchProducts(params: { q?: string; categoryC1?: number; 
       categoryC1: products.legacyC1,
       categoryNameEn: categories.nameEn,
       sellPrice: products.sellPrice,
+      fixedPrice: products.fixedPrice,
       avgCost: products.avgCost,
+      allowItemDiscount: products.allowItemDiscount,
       excludeFromCrmBonus: products.excludeFromCrmBonus,
       active: products.active,
     })
@@ -229,7 +342,8 @@ export async function searchProducts(params: { q?: string; categoryC1?: number; 
     .leftJoin(categories, eq(products.categoryId, categories.id))
     .where(filters.length > 0 ? and(...filters) : undefined)
     .orderBy(products.barcode)
-    .limit(limit);
+    .limit(limit)
+    .offset(offset);
 
   return rows.map((r) => ({
     id: r.id,
@@ -241,9 +355,74 @@ export async function searchProducts(params: { q?: string; categoryC1?: number; 
     categoryC1: r.categoryC1,
     unitPriceHkd: Number(r.sellPrice),
     avgCostHkd: Number(r.avgCost),
+    allowItemDiscount: r.allowItemDiscount,
+    isFixedPrice: r.fixedPrice !== null,
     excludeFromCrmBonus: r.excludeFromCrmBonus,
     active: r.active,
   }));
+}
+
+export async function countProducts(params: { q?: string; categoryC1?: number }) {
+  const conn = requireSharedDb();
+  const q = params.q?.trim();
+  const filters = [];
+  if (q) {
+    const pattern = `%${q}%`;
+    filters.push(
+      or(
+        like(products.barcode, pattern),
+        like(products.ubc, pattern),
+        like(products.nameEn, pattern),
+        like(products.nameZh, pattern),
+      ),
+    );
+  }
+  if (params.categoryC1 !== undefined && Number.isFinite(params.categoryC1)) {
+    filters.push(eq(products.legacyC1, params.categoryC1));
+  }
+  const [row] = await conn.db
+    .select({ total: sql<number>`COUNT(*)` })
+    .from(products)
+    .where(filters.length > 0 ? and(...filters) : undefined);
+  return Number(row?.total ?? 0);
+}
+
+export async function findExactProductByCode(code: string) {
+  const clean = code.trim();
+  if (!clean) return null;
+  const conn = requireSharedDb();
+  const selectFields = {
+    id: products.id,
+    sku: products.barcode,
+    ubc: products.ubc,
+    nameZh: products.nameZh,
+    nameEn: products.nameEn,
+    categoryC1: products.legacyC1,
+    sellPrice: products.sellPrice,
+    fixedPrice: products.fixedPrice,
+    avgCost: products.avgCost,
+    allowItemDiscount: products.allowItemDiscount,
+    excludeFromCrmBonus: products.excludeFromCrmBonus,
+  };
+  let rows = await conn.db.select(selectFields).from(products).where(eq(products.barcode, clean)).limit(1);
+  if (rows.length === 0) {
+    rows = await conn.db.select(selectFields).from(products).where(eq(products.ubc, clean)).limit(1);
+  }
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    id: r.id,
+    sku: r.sku,
+    ubc: r.ubc,
+    nameZh: r.nameZh,
+    nameEn: r.nameEn || r.nameZh,
+    categoryC1: r.categoryC1,
+    unitPriceHkd: Number(r.sellPrice),
+    avgCostHkd: Number(r.avgCost),
+    allowItemDiscount: r.allowItemDiscount,
+    isFixedPrice: r.fixedPrice !== null,
+    excludeFromCrmBonus: r.excludeFromCrmBonus,
+  };
 }
 
 export async function listCategoriesAndUnits() {
@@ -313,10 +492,13 @@ export async function listPosMenusWithButtons() {
       labelEn: posMenuButtons.labelEn,
       gridPosition: posMenuButtons.gridPosition,
       sku: products.barcode,
+      ubc: products.ubc,
       nameZh: products.nameZh,
       nameEn: products.nameEn,
       categoryC1: products.legacyC1,
       sellPrice: products.sellPrice,
+      fixedPrice: products.fixedPrice,
+      allowItemDiscount: products.allowItemDiscount,
       excludeFromCrmBonus: products.excludeFromCrmBonus,
     })
     .from(posMenuButtons)
@@ -339,32 +521,69 @@ export async function listPosMenusWithButtons() {
       .filter((b) => b.sku !== null)
       .map((b) => ({
         sku: b.sku!,
+        ubc: b.ubc ?? "",
         nameZh: b.nameZh ?? b.labelZh,
         nameEn: b.nameEn || b.labelEn,
         categoryC1: b.categoryC1 ?? 0,
         unitPriceHkd: Number(b.sellPrice ?? 0),
+        allowItemDiscount: b.allowItemDiscount ?? true,
+        isFixedPrice: b.fixedPrice !== null,
         excludeFromCrmBonus: b.excludeFromCrmBonus ?? false,
       })),
   }));
 }
 
-export async function searchCustomers(params: { q?: string; limit?: number }) {
+export async function searchCustomers(params: { q?: string; limit?: number; offset?: number }) {
   const conn = requireSharedDb();
   const q = params.q?.trim();
   const limit = Math.min(params.limit ?? 50, 200);
+  const offset = Math.max(0, params.offset ?? 0);
   const pattern = q ? `%${q}%` : undefined;
 
   const rows = await conn.db
     .select({
       id: customers.id,
       legacyId: customers.legacyId,
+      gradeId: customers.gradeId,
+      gradeNameEn: customerGrades.nameEn,
+      gradeNameZh: customerGrades.nameZh,
       nameZh: customers.nameZh,
       nameEn: customers.nameEn,
       phone: customers.phone,
       email: customers.email,
       pointsBalance: customers.pointsBalance,
       active: customers.active,
+      cardNo: sql<string | null>`(SELECT mc.card_no FROM member_cards mc WHERE mc.customer_id = ${customers.id} AND mc.active = 1 ORDER BY mc.id LIMIT 1)`,
     })
+    .from(customers)
+    .leftJoin(customerGrades, eq(customers.gradeId, customerGrades.id))
+    .where(
+      pattern
+        ? or(
+            like(customers.legacyId, pattern),
+            like(customers.nameZh, pattern),
+            like(customers.nameEn, pattern),
+            like(customers.phone, pattern),
+            sql`EXISTS (SELECT 1 FROM member_cards mc WHERE mc.customer_id = ${customers.id} AND mc.card_no LIKE ${pattern})`,
+          )
+        : undefined,
+    )
+    .orderBy(desc(customers.pointsBalance), customers.id)
+    .limit(limit)
+    .offset(offset);
+
+  return rows.map((r) => ({
+    ...r,
+    gradeName: r.gradeNameZh || r.gradeNameEn || "",
+    cardNo: r.cardNo ?? "",
+  }));
+}
+
+export async function countCustomers(q?: string) {
+  const conn = requireSharedDb();
+  const pattern = q?.trim() ? `%${q.trim()}%` : undefined;
+  const [row] = await conn.db
+    .select({ total: sql<number>`COUNT(*)` })
     .from(customers)
     .where(
       pattern
@@ -373,29 +592,80 @@ export async function searchCustomers(params: { q?: string; limit?: number }) {
             like(customers.nameZh, pattern),
             like(customers.nameEn, pattern),
             like(customers.phone, pattern),
+            sql`EXISTS (SELECT 1 FROM member_cards mc WHERE mc.customer_id = ${customers.id} AND mc.card_no LIKE ${pattern})`,
           )
         : undefined,
-    )
-    .orderBy(desc(customers.pointsBalance), customers.id)
-    .limit(limit);
+    );
+  return Number(row?.total ?? 0);
+}
 
-  return rows;
+export async function listCustomerGrades() {
+  const conn = requireSharedDb();
+  return conn.db.select().from(customerGrades).orderBy(customerGrades.legacyCode);
+}
+
+export async function listStaffPage(params: { q?: string; page?: number; pageSize?: number }) {
+  const conn = requireSharedDb();
+  const page = Math.max(1, params.page ?? 1);
+  const pageSize = Math.min(50, Math.max(1, params.pageSize ?? 12));
+  const pattern = params.q?.trim() ? `%${params.q.trim()}%` : undefined;
+  const filter = pattern
+    ? or(like(staff.legacyId, pattern), like(staff.displayName, pattern))
+    : undefined;
+  const [rows, countRows] = await Promise.all([
+    conn.db
+      .select({
+        id: staff.id,
+        legacyId: staff.legacyId,
+        displayName: staff.displayName,
+        roleLevel: staffRoles.legacyAuthorityLevel,
+        active: staff.active,
+      })
+      .from(staff)
+      .innerJoin(staffRoles, eq(staff.roleId, staffRoles.id))
+      .where(filter)
+      .orderBy(staff.legacyId, staff.id)
+      .limit(pageSize)
+      .offset((page - 1) * pageSize),
+    conn.db.select({ total: sql<number>`COUNT(*)` }).from(staff).where(filter),
+  ]);
+  const total = Number(countRows[0]?.total ?? 0);
+  return { items: rows, total, page, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)) };
 }
 
 export async function upsertCustomerRecord(input: {
+  id?: number;
   legacyId?: string;
+  gradeId?: number | null;
   nameZh: string;
   nameEn?: string;
   phone?: string;
   email?: string;
 }) {
   const conn = requireSharedDb();
+  if (input.id) {
+    const existingById = await conn.db.select().from(customers).where(eq(customers.id, input.id)).limit(1);
+    if (existingById.length > 0) {
+      await conn.db
+        .update(customers)
+        .set({
+          gradeId: input.gradeId !== undefined ? input.gradeId : existingById[0]!.gradeId,
+          nameZh: input.nameZh,
+          nameEn: input.nameEn ?? existingById[0]!.nameEn,
+          phone: input.phone ?? existingById[0]!.phone,
+          email: input.email ?? existingById[0]!.email,
+        })
+        .where(eq(customers.id, existingById[0]!.id));
+      return { ok: true, id: existingById[0]!.id, legacyId: existingById[0]!.legacyId };
+    }
+  }
   const idKey = input.legacyId?.trim() || `CUST${Date.now().toString().slice(-8)}`;
   const existing = await conn.db.select().from(customers).where(eq(customers.legacyId, idKey)).limit(1);
   if (existing.length > 0) {
     await conn.db
       .update(customers)
       .set({
+        gradeId: input.gradeId !== undefined ? input.gradeId : existing[0]!.gradeId,
         nameZh: input.nameZh,
         nameEn: input.nameEn ?? existing[0]!.nameEn,
         phone: input.phone ?? existing[0]!.phone,
@@ -406,6 +676,7 @@ export async function upsertCustomerRecord(input: {
   }
   const res = await conn.db.insert(customers).values({
     legacyId: idKey,
+    gradeId: input.gradeId ?? null,
     nameZh: input.nameZh,
     nameEn: input.nameEn ?? "",
     phone: input.phone ?? "",
@@ -505,11 +776,68 @@ export async function listInvoices(params: {
   }));
 }
 
+export async function listBillQuery(view: "today" | "held" | "office" | "unprocessed", shopId: number) {
+  const conn = requireSharedDb();
+  const today = formatHktBusinessDate();
+  const retailTypes = ["RETAIL_SALE", "SALES_INVOICE", "SALES_RETURN"];
+  const filters = [eq(bills.shopId, shopId)];
+
+  if (view === "today") {
+    filters.push(eq(bills.businessDate, today), inArray(bills.docType, retailTypes), ne(bills.sourceTable, "OfficeXHeader"));
+  } else if (view === "held") {
+    filters.push(inArray(bills.status, ["held", "intraday"]));
+  } else if (view === "office") {
+    filters.push(sql`(${bills.docType} NOT IN ('RETAIL_SALE', 'SALES_INVOICE', 'SALES_RETURN') OR ${bills.sourceTable} = 'OfficeXHeader')`);
+  } else {
+    filters.push(
+      sql`${bills.status} <> 'cancelled'`,
+      sql`(${bills.status} IN ('open', 'held', 'intraday') OR ${bills.balanceDue} > 0 OR ${deliveryOrders.deliveryStatus} = 'pending')`,
+    );
+  }
+
+  const rows = await conn.db
+    .select({
+      id: bills.id,
+      invoiceNo: bills.invoiceNo,
+      docType: bills.docType,
+      status: bills.status,
+      paymentStatus: bills.paymentStatus,
+      businessDate: bills.businessDate,
+      netAmount: bills.netAmount,
+      balanceDue: bills.balanceDue,
+      issuedAt: bills.issuedAt,
+      customerNameZh: customers.nameZh,
+      customerNameEn: customers.nameEn,
+      deliveryStatus: deliveryOrders.deliveryStatus,
+    })
+    .from(bills)
+    .leftJoin(customers, eq(bills.customerId, customers.id))
+    .leftJoin(deliveryOrders, eq(deliveryOrders.billId, bills.id))
+    .where(and(...filters))
+    .orderBy(desc(bills.issuedAt), desc(bills.id))
+    .limit(200);
+
+  return rows.map((row) => ({
+    invoiceNo: row.invoiceNo,
+    docType: row.docType,
+    status: row.status,
+    paymentStatus: row.paymentStatus,
+    businessDate: row.businessDate,
+    customerName: row.customerNameZh || row.customerNameEn || "散客",
+    netAmountHkd: Number(row.netAmount),
+    balanceDueHkd: Number(row.balanceDue),
+    issuedAtIso: row.issuedAt.toISOString(),
+    deliveryStatus: row.deliveryStatus,
+  }));
+}
+
 export async function getInvoiceDetailByNo(invoiceNo: string) {
   const conn = requireSharedDb();
   const [bill] = await conn.db
     .select({
       id: bills.id,
+      shopId: bills.shopId,
+      terminalId: bills.terminalId,
       invoiceNo: bills.invoiceNo,
       docType: bills.docType,
       status: bills.status,
@@ -523,10 +851,12 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
       issuedAt: bills.issuedAt,
       paidAt: bills.paidAt,
       notes: bills.notes,
+      customerId: customers.id,
       customerLegacyId: customers.legacyId,
       customerNameZh: customers.nameZh,
       customerNameEn: customers.nameEn,
       customerPhone: customers.phone,
+      customerPointsBalance: customers.pointsBalance,
     })
     .from(bills)
     .leftJoin(customers, eq(bills.customerId, customers.id))
@@ -535,7 +865,7 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
 
   if (!bill) return null;
 
-  const [lines, pmts, settings] = await Promise.all([
+  const [lines, pmts, settings, deliveries] = await Promise.all([
     conn.db.select().from(billLines).where(eq(billLines.billId, bill.id)).orderBy(billLines.lineNo),
     conn.db
       .select()
@@ -543,6 +873,7 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
       .where(and(eq(billPayments.billId, bill.id), eq(billPayments.voided, false)))
       .orderBy(billPayments.paidAt),
     getAppSettings(),
+    conn.db.select().from(deliveryOrders).where(eq(deliveryOrders.billId, bill.id)).limit(1),
   ]);
 
   return {
@@ -560,12 +891,15 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
       issuedAtIso: bill.issuedAt.toISOString(),
       paidAtIso: bill.paidAt?.toISOString(),
       notes: bill.notes,
+      deliveryStatus: deliveries[0]?.deliveryStatus ?? null,
       customer: bill.customerLegacyId
         ? {
+            id: bill.customerId!,
             legacyId: bill.customerLegacyId,
             nameZh: bill.customerNameZh,
             nameEn: bill.customerNameEn,
             phone: bill.customerPhone,
+            pointsBalance: bill.customerPointsBalance ?? 0,
           }
         : null,
     },
@@ -574,6 +908,7 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
       sku: l.sku,
       nameZh: l.nameZh,
       nameEn: l.nameEn,
+      categoryC1: l.categoryC1,
       quantity: Number(l.quantity),
       unitPriceHkd: Number(l.unitPrice),
       discountRate: Number(l.discountRate),
@@ -593,8 +928,10 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
   };
 }
 
-export async function listStockOverview(params: { q?: string; limit?: number }) {
+export async function listStockOverview(params: { q?: string; limit?: number; shopId?: number }) {
   const conn = requireSharedDb();
+  const storeCtx = await resolveActiveStoreContext();
+  const targetShopId = params.shopId ?? storeCtx.shopId;
   const q = params.q?.trim();
   const limit = Math.min(params.limit ?? 80, 200);
   const pattern = q ? `%${q}%` : undefined;
@@ -611,8 +948,15 @@ export async function listStockOverview(params: { q?: string; limit?: number }) 
       movingAvgCost: stockBalances.movingAvgCost,
     })
     .from(products)
-    .leftJoin(stockBalances, eq(stockBalances.productId, products.id))
-    .where(pattern ? or(like(products.barcode, pattern), like(products.nameEn, pattern), like(products.nameZh, pattern)) : undefined)
+    .leftJoin(
+      stockBalances,
+      and(eq(stockBalances.productId, products.id), eq(stockBalances.shopId, targetShopId)),
+    )
+    .where(
+      pattern
+        ? or(like(products.barcode, pattern), like(products.ubc, pattern), like(products.nameEn, pattern), like(products.nameZh, pattern))
+        : undefined,
+    )
     .orderBy(products.barcode)
     .limit(limit);
 
@@ -629,35 +973,162 @@ export async function listStockOverview(params: { q?: string; limit?: number }) 
   }));
 }
 
-export async function getDayEndPreview(businessDate: string) {
+export async function listStockPage(params: {
+  q?: string;
+  categoryC1?: number;
+  page?: number;
+  pageSize?: number;
+  shopId: number;
+}) {
   const conn = requireSharedDb();
+  const page = Math.max(1, params.page ?? 1);
+  const pageSize = Math.min(200, Math.max(1, params.pageSize ?? 80));
+  const pattern = params.q?.trim() ? `%${params.q.trim()}%` : undefined;
+  const filters = [];
+  if (pattern) {
+    filters.push(
+      or(
+        like(products.barcode, pattern),
+        like(products.ubc, pattern),
+        like(products.nameEn, pattern),
+        like(products.nameZh, pattern),
+      ),
+    );
+  }
+  if (params.categoryC1 !== undefined && Number.isFinite(params.categoryC1)) {
+    filters.push(eq(products.legacyC1, params.categoryC1));
+  }
+  const whereClause = filters.length > 0 ? and(...filters) : undefined;
+  const [countRow] = await conn.db.select({ count: sql<number>`COUNT(*)` }).from(products).where(whereClause);
+  const total = Number(countRow?.count ?? 0);
+  const rows = await conn.db
+    .select({
+      productId: products.id,
+      sku: products.barcode,
+      nameZh: products.nameZh,
+      nameEn: products.nameEn,
+      categoryC1: products.legacyC1,
+      sellPrice: products.sellPrice,
+      onHandQty: stockBalances.onHandQty,
+      movingAvgCost: stockBalances.movingAvgCost,
+    })
+    .from(products)
+    .leftJoin(
+      stockBalances,
+      and(eq(stockBalances.productId, products.id), eq(stockBalances.shopId, params.shopId)),
+    )
+    .where(whereClause)
+    .orderBy(products.barcode)
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+
+  return {
+    items: rows.map((row) => ({
+      productId: row.productId,
+      sku: row.sku,
+      nameZh: row.nameZh,
+      nameEn: row.nameEn || row.nameZh,
+      categoryC1: row.categoryC1,
+      sellPriceHkd: Number(row.sellPrice),
+      onHandQty: Number(row.onHandQty ?? 0),
+      movingAvgCostHkd: Number(row.movingAvgCost ?? 0),
+      valuationHkd: Number((Number(row.onHandQty ?? 0) * Number(row.movingAvgCost ?? 0)).toFixed(2)),
+    })),
+    total,
+    page,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(total / pageSize)),
+  };
+}
+
+export async function listStockMovements(productId: number, shopId: number, limit = 40) {
+  const conn = requireSharedDb();
+  const rows = await conn.db
+    .select({
+      id: stockMovements.id,
+      movementType: stockMovements.movementType,
+      legacyXc: stockMovements.legacyXc,
+      onHandDelta: stockMovements.onHandDelta,
+      unitCost: stockMovements.unitCost,
+      movingAvgCostAfter: stockMovements.movingAvgCostAfter,
+      createdAt: stockMovements.createdAt,
+      invoiceNo: bills.invoiceNo,
+    })
+    .from(stockMovements)
+    .leftJoin(bills, eq(stockMovements.billId, bills.id))
+    .where(and(eq(stockMovements.shopId, shopId), eq(stockMovements.productId, productId)))
+    .orderBy(desc(stockMovements.createdAt), desc(stockMovements.id))
+    .limit(Math.min(100, Math.max(1, limit)));
+
+  return rows.map((r) => ({
+    id: r.id,
+    movementType: r.movementType,
+    legacyXc: r.legacyXc,
+    onHandDelta: Number(r.onHandDelta),
+    unitCostHkd: Number(r.unitCost),
+    movingAvgCostAfterHkd: Number(r.movingAvgCostAfter),
+    invoiceNo: r.invoiceNo ?? null,
+    createdAtIso: r.createdAt.toISOString(),
+  }));
+}
+
+export async function getDayEndPreview(businessDate: string, shopId?: number) {
+  const conn = requireSharedDb();
+  const targetShopId = shopId ?? (await resolveActiveStoreContext()).shopId;
+
   const [salesAgg] = await conn.db
     .select({
       billCount: sql<number>`COUNT(*)`,
-      issuedTotal: sql<string>`COALESCE(SUM(${bills.netAmount}), 0)`,
+      issuedTotal: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.netAmount} ELSE ${bills.netAmount} END), 0)`,
       unpaidIssuedTotal: sql<string>`COALESCE(SUM(${bills.balanceDue}), 0)`,
     })
     .from(bills)
-    .where(and(eq(bills.businessDate, businessDate), sql`${bills.status} <> 'cancelled'`));
+    .where(
+      and(
+        eq(bills.shopId, targetShopId),
+        eq(bills.businessDate, businessDate),
+        sql`${bills.status} <> 'cancelled'`,
+        inArray(bills.docType, [...SALES_DOC_TYPES]),
+      ),
+    );
 
   const tenderRows = await conn.db
     .select({
       tenderCode: billPayments.tenderCode,
       txCount: sql<number>`COUNT(*)`,
-      collectedTotal: sql<string>`COALESCE(SUM(${billPayments.amount}), 0)`,
+      collectedTotal: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} IN ('SALES_RETURN', 'PETTY_PAYOUT') THEN -${billPayments.amount} ELSE ${billPayments.amount} END), 0)`,
     })
     .from(billPayments)
-    .where(and(eq(billPayments.businessDate, businessDate), eq(billPayments.voided, false)))
+    .innerJoin(bills, eq(billPayments.billId, bills.id))
+    .where(
+      and(
+        eq(bills.shopId, targetShopId),
+        eq(billPayments.businessDate, businessDate),
+        eq(billPayments.voided, false),
+        sql`${bills.status} <> 'cancelled'`,
+      ),
+    )
     .groupBy(billPayments.tenderCode);
 
-  const recentBatches = await conn.db
-    .select()
-    .from(dayEndBatches)
-    .orderBy(desc(dayEndBatches.businessDate), desc(dayEndBatches.batchNo))
-    .limit(12);
+  const [recentBatches, floatRows] = await Promise.all([
+    conn.db
+      .select()
+      .from(dayEndBatches)
+      .where(eq(dayEndBatches.shopId, targetShopId))
+      .orderBy(desc(dayEndBatches.businessDate), desc(dayEndBatches.batchNo))
+      .limit(12),
+    conn.db
+      .select()
+      .from(appSettings)
+      .where(and(eq(appSettings.shopId, targetShopId), eq(appSettings.settingKey, `opening_float_${businessDate}`)))
+      .limit(1),
+  ]);
+
+  const floatVal = (floatRows[0]?.settingValue ?? {}) as { amountHkd?: number };
 
   return {
     businessDate,
+    openingFloatHkd: Number(floatVal.amountHkd ?? 0),
     billCount: Number(salesAgg?.billCount ?? 0),
     issuedSalesTotalHkd: Number(salesAgg?.issuedTotal ?? 0),
     unpaidIssuedBalanceHkd: Number(salesAgg?.unpaidIssuedTotal ?? 0),
@@ -678,45 +1149,158 @@ export async function getDayEndPreview(businessDate: string) {
   };
 }
 
-export async function getOperationalReports(params: { fromDate: string; toDate: string }) {
+export async function getHourlySalesReport(businessDate: string, shopId: number) {
   const conn = requireSharedDb();
+  const rows = await conn.db
+    .select({
+      hourOfDay: sql<number>`HOUR(${bills.issuedAt})`,
+      billCount: sql<number>`COUNT(*)`,
+      netSales: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.netAmount} ELSE ${bills.netAmount} END), 0)`,
+    })
+    .from(bills)
+    .where(
+      and(
+        eq(bills.shopId, shopId),
+        eq(bills.businessDate, businessDate),
+        sql`${bills.status} <> 'cancelled'`,
+        inArray(bills.docType, [...SALES_DOC_TYPES]),
+      ),
+    )
+    .groupBy(sql`HOUR(${bills.issuedAt})`)
+    .orderBy(sql`HOUR(${bills.issuedAt})`);
+  const byHour = new Map(rows.map((row) => [Number(row.hourOfDay), row]));
+  const hours = Array.from({ length: 24 }, (_, hourOfDay) => {
+    const row = byHour.get(hourOfDay);
+    const billCount = Number(row?.billCount ?? 0);
+    const netSalesHkd = Number(row?.netSales ?? 0);
+    return { hourOfDay, billCount, netSalesHkd, averageBillHkd: billCount ? netSalesHkd / billCount : 0 };
+  });
+  return { businessDate, hours, totalBills: hours.reduce((sum, row) => sum + row.billCount, 0), totalSalesHkd: hours.reduce((sum, row) => sum + row.netSalesHkd, 0) };
+}
+
+export async function getItemSalesReport(businessDate: string, shopId: number) {
+  const conn = requireSharedDb();
+  const rows = await conn.db
+    .select({
+      sku: billLines.sku,
+      nameZh: billLines.nameZh,
+      nameEn: billLines.nameEn,
+      quantity: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${billLines.quantity} ELSE ${billLines.quantity} END), 0)`,
+      netSales: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${billLines.lineTotal} ELSE ${billLines.lineTotal} END), 0)`,
+    })
+    .from(billLines)
+    .innerJoin(bills, eq(billLines.billId, bills.id))
+    .where(
+      and(
+        eq(bills.shopId, shopId),
+        eq(bills.businessDate, businessDate),
+        sql`${bills.status} <> 'cancelled'`,
+        eq(billLines.cancelled, false),
+        sql`${billLines.legacyDk} > 0`,
+        inArray(bills.docType, [...SALES_DOC_TYPES]),
+      ),
+    )
+    .groupBy(billLines.sku, billLines.nameZh, billLines.nameEn)
+    .orderBy(desc(sql`SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${billLines.lineTotal} ELSE ${billLines.lineTotal} END)`));
+  const totalSalesHkd = rows.reduce((sum, row) => sum + Number(row.netSales), 0);
+  return {
+    businessDate,
+    totalSalesHkd,
+    items: rows.map((row) => ({
+      sku: row.sku,
+      nameZh: row.nameZh,
+      nameEn: row.nameEn,
+      quantity: Number(row.quantity),
+      netSalesHkd: Number(row.netSales),
+      salesShare: totalSalesHkd ? Number(row.netSales) / totalSalesHkd : 0,
+    })),
+  };
+}
+
+export async function getHistoricalSalesReport(fromDate: string, toDate: string, shopId: number) {
+  const conn = requireSharedDb();
+  const rows = await conn.db
+    .select({
+      businessDate: bills.businessDate,
+      billCount: sql<number>`COUNT(*)`,
+      grossSales: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.grossAmount} ELSE ${bills.grossAmount} END), 0)`,
+      discounts: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.discountAmount} ELSE ${bills.discountAmount} END), 0)`,
+      netSales: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.netAmount} ELSE ${bills.netAmount} END), 0)`,
+      collected: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.paidAmount} ELSE ${bills.paidAmount} END), 0)`,
+      balanceDue: sql<string>`COALESCE(SUM(${bills.balanceDue}), 0)`,
+    })
+    .from(bills)
+    .where(
+      and(
+        eq(bills.shopId, shopId),
+        sql`${bills.businessDate} >= ${fromDate}`,
+        sql`${bills.businessDate} <= ${toDate}`,
+        sql`${bills.status} <> 'cancelled'`,
+        inArray(bills.docType, [...SALES_DOC_TYPES]),
+      ),
+    )
+    .groupBy(bills.businessDate)
+    .orderBy(desc(bills.businessDate));
+  return {
+    fromDate,
+    toDate,
+    days: rows.map((row) => ({
+      businessDate: row.businessDate,
+      billCount: Number(row.billCount),
+      grossSalesHkd: Number(row.grossSales),
+      discountsHkd: Number(row.discounts),
+      netSalesHkd: Number(row.netSales),
+      collectedHkd: Number(row.collected),
+      balanceDueHkd: Number(row.balanceDue),
+    })),
+  };
+}
+
+export async function getOperationalReports(params: { fromDate: string; toDate: string; shopId?: number }) {
+  const conn = requireSharedDb();
+  const targetShopId = params.shopId ?? (await resolveActiveStoreContext()).shopId;
 
   const [tenderRows, categoryRows, arSummary, stockVal, recentAudits] = await Promise.all([
     conn.db
       .select({
         tenderCode: billPayments.tenderCode,
         txCount: sql<number>`COUNT(*)`,
-        totalHkd: sql<string>`COALESCE(SUM(${billPayments.amount}), 0)`,
+        totalHkd: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} IN ('SALES_RETURN', 'PETTY_PAYOUT') THEN -${billPayments.amount} ELSE ${billPayments.amount} END), 0)`,
       })
       .from(billPayments)
+      .innerJoin(bills, eq(billPayments.billId, bills.id))
       .where(
         and(
+          eq(bills.shopId, targetShopId),
           eq(billPayments.voided, false),
+          sql`${bills.status} <> 'cancelled'`,
           sql`${billPayments.businessDate} >= ${params.fromDate}`,
           sql`${billPayments.businessDate} <= ${params.toDate}`,
         ),
       )
       .groupBy(billPayments.tenderCode)
-      .orderBy(desc(sql`SUM(${billPayments.amount})`)),
+      .orderBy(desc(sql`SUM(CASE WHEN ${bills.docType} IN ('SALES_RETURN', 'PETTY_PAYOUT') THEN -${billPayments.amount} ELSE ${billPayments.amount} END)`)),
     conn.db
       .select({
         categoryC1: billLines.categoryC1,
         lineCount: sql<number>`COUNT(*)`,
-        totalHkd: sql<string>`COALESCE(SUM(${billLines.lineTotal}), 0)`,
+        totalHkd: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${billLines.lineTotal} ELSE ${billLines.lineTotal} END), 0)`,
       })
       .from(billLines)
       .innerJoin(bills, eq(billLines.billId, bills.id))
       .where(
         and(
+          eq(bills.shopId, targetShopId),
           eq(billLines.cancelled, false),
           sql`${billLines.legacyDk} > 0`,
           sql`${bills.status} <> 'cancelled'`,
+          inArray(bills.docType, [...SALES_DOC_TYPES]),
           sql`${bills.businessDate} >= ${params.fromDate}`,
           sql`${bills.businessDate} <= ${params.toDate}`,
         ),
       )
       .groupBy(billLines.categoryC1)
-      .orderBy(desc(sql`SUM(${billLines.lineTotal})`))
+      .orderBy(desc(sql`SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${billLines.lineTotal} ELSE ${billLines.lineTotal} END)`))
       .limit(15),
     conn.db
       .select({
@@ -724,7 +1308,14 @@ export async function getOperationalReports(params: { fromDate: string; toDate: 
         totalBalanceDue: sql<string>`COALESCE(SUM(${bills.balanceDue}), 0)`,
       })
       .from(bills)
-      .where(and(inArray(bills.paymentStatus, ["unpaid", "partial"]), sql`${bills.balanceDue} > 0`)),
+      .where(
+        and(
+          eq(bills.shopId, targetShopId),
+          sql`${bills.status} <> 'cancelled'`,
+          inArray(bills.paymentStatus, ["unpaid", "partial"]),
+          sql`${bills.balanceDue} > 0`,
+        ),
+      ),
     conn.db
       .select({
         skuCount: sql<number>`COUNT(*)`,
@@ -732,12 +1323,12 @@ export async function getOperationalReports(params: { fromDate: string; toDate: 
         totalValuation: sql<string>`COALESCE(SUM(${stockBalances.onHandQty} * ${stockBalances.movingAvgCost}), 0)`,
       })
       .from(stockBalances)
-      .where(sql`${stockBalances.onHandQty} > 0`),
+      .where(and(eq(stockBalances.shopId, targetShopId), sql`${stockBalances.onHandQty} > 0`)),
     conn.db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(25),
   ]);
 
   return {
-    range: params,
+    range: { fromDate: params.fromDate, toDate: params.toDate },
     salesByTender: tenderRows.map((r) => ({
       tenderCode: r.tenderCode,
       txCount: Number(r.txCount),

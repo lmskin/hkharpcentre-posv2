@@ -115,7 +115,7 @@ describe("Golden-Master V47 Replay (Scratch_DataGXHarpS1V47)", () => {
         });
       }
 
-      expect(bills.size).toBe(28285);
+      expect(bills.size).toBe(28299);
 
       let cf0Count = 0;
       let cf1Count = 0;
@@ -143,8 +143,8 @@ describe("Golden-Master V47 Replay (Scratch_DataGXHarpS1V47)", () => {
         }
       }
 
-      expect(cf0Count).toBe(26943);
-      expect(cf1Count).toBe(1342);
+      expect(cf0Count).toBe(26955);
+      expect(cf1Count).toBe(1344);
       expect(crmMarkerBills).toBeGreaterThan(0);
       // 99.93% of CF=0 XC=99 headers equal active sum(TA) directly; 99.79% equal raw QU*UP*(1-DP) within $0.05 before V47 10c/real(24) rounding
       expect(storedTaExactMatch).toBeGreaterThanOrEqual(26925);

@@ -19,12 +19,25 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { BillDocType, TenderCode } from "@hkharp/contracts";
-import type { SessionPayload } from "@hkharp/db";
+import type { ActiveStoreContext, SessionPayload } from "@hkharp/db";
 import { calculateBillTotals } from "@hkharp/domain/bill-math";
 import { calculateCrmPoints } from "@hkharp/domain/crm-rules";
 import { formatHkd } from "@hkharp/domain/money";
 import { validateOctopusAmountHkd } from "@hkharp/domain/octopus-rules";
+import { applyPromotionRules, type PromotionRule } from "@hkharp/domain/promotion-engine";
 import type { PosCustomer, PosMenuGroup, PosProduct } from "@/components/PosRegisterClient";
+import { BillQueryDialog } from "@/components/BillQueryDialog";
+import { LegacyPicker } from "@/components/LegacyPicker";
+import type { ReceiptDetail } from "@/components/ReceiptPreview";
+import { StockPanel } from "@/components/StockPanel";
+import { ChangePasswordDialog } from "@/components/ChangePasswordDialog";
+import { PrinterSetupDialog } from "@/components/PrinterSetupDialog";
+import { HourlyReport } from "@/components/reports/HourlyReport";
+import { ItemReport } from "@/components/reports/ItemReport";
+import { HistoryReport } from "@/components/reports/HistoryReport";
+import { SupportDialog, type SupportKind } from "@/components/SupportDialog";
+import { OfficeTxnPanel, type OfficeDocType } from "@/components/OfficeTxnPanel";
+import { formatLegacyMessage, type LegacyLanguage } from "@/lib/legacy-messages";
 
 interface CartLine {
   item: PosProduct;
@@ -38,6 +51,14 @@ interface SavedDocSummary {
   paymentStatus: string;
   netAmountHkd: number;
   balanceDueHkd: number;
+}
+
+interface PosStaff {
+  id: number;
+  legacyId: string | null;
+  displayName: string;
+  roleLevel: number;
+  active: boolean;
 }
 
 type PanelId =
@@ -70,12 +91,25 @@ const TENDERS: ReadonlyArray<{ key: TenderChoice; zh: string; sub?: string }> = 
   { key: "UNPAID_INVOICE", zh: "付款一", sub: "掛單" },
 ];
 
+interface SplitPaymentEntry {
+  id: string;
+  tenderCode: TenderCode;
+  amountHkd: number;
+  approvalCode?: string;
+  cardLast4?: string;
+  octopusCardId?: string;
+  octopusDeviceId?: string;
+  octopusRemainingHkd?: number;
+  remarks?: string;
+}
+
 const LINE_DISCOUNTS = [0, 0.05, 0.1, 0.15, 0.2];
 
 const VB_FONT = "Tahoma, 'Microsoft JhengHei', 'PMingLiU', sans-serif";
 
 export function PosClassicClient({
   session,
+  storeContext,
   menus,
   initialProducts,
   initialCustomers,
@@ -83,6 +117,7 @@ export function PosClassicClient({
   bridgeToken,
 }: {
   session: SessionPayload | null;
+  storeContext?: ActiveStoreContext | null;
   menus: PosMenuGroup[];
   initialProducts: PosProduct[];
   initialCustomers: PosCustomer[];
@@ -100,6 +135,15 @@ export function PosClassicClient({
   const [customers, setCustomers] = useState<PosCustomer[]>(initialCustomers);
   const [customerQuery, setCustomerQuery] = useState("");
   const [selectedCustomer, setSelectedCustomer] = useState<PosCustomer | null>(null);
+  const [productPage, setProductPage] = useState(1);
+  const [productTotal, setProductTotal] = useState(initialProducts.length);
+  const [customerPage, setCustomerPage] = useState(1);
+  const [customerTotal, setCustomerTotal] = useState(initialCustomers.length);
+  const [staffItems, setStaffItems] = useState<PosStaff[]>([]);
+  const [staffQuery, setStaffQuery] = useState("");
+  const [staffPage, setStaffPage] = useState(1);
+  const [staffTotal, setStaffTotal] = useState(0);
+  const [pickerLoading, setPickerLoading] = useState(false);
 
   // ---- legacy UI state ------------------------------------------------------
   // Legacy starts on the 影像 panel (Harp Centre logo + support hotline).
@@ -109,8 +153,16 @@ export function PosClassicClient({
   const [tenderMode, setTenderMode] = useState(false);
   const [msg, setMsg] = useState<{ code: string; text: string } | null>(null);
   const [showBillQuery, setShowBillQuery] = useState(false);
+  const [showStock, setShowStock] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showPrinter, setShowPrinter] = useState(false);
+  const [activeReport, setActiveReport] = useState<"hourly" | "items" | "history" | null>(null);
+  const [supportKind, setSupportKind] = useState<SupportKind | null>(null);
+  const [officeTxnType, setOfficeTxnType] = useState<OfficeDocType | null>(null);
   const [showAbout, setShowAbout] = useState(false);
   const [clock, setClock] = useState(() => new Date());
+  const [language, setLanguage] = useState<LegacyLanguage>("TC");
+  const [completedInvoiceNo, setCompletedInvoiceNo] = useState<string | null>(null);
 
   // ---- transaction state (same semantics as PosRegisterClient) --------------
   const [docType, setDocType] = useState<BillDocType>("RETAIL_SALE");
@@ -128,7 +180,15 @@ export function PosClassicClient({
     remainingHkd: number;
   } | null>(null);
   const [draftBillRef] = useState(() => `POS-${Date.now()}`);
-  const [recentDocs, setRecentDocs] = useState<SavedDocSummary[]>([]);
+  const [, setRecentDocs] = useState<SavedDocSummary[]>([]);
+  const [editingInvoiceNo, setEditingInvoiceNo] = useState<string | null>(null);
+  const [isDelivery, setIsDelivery] = useState(false);
+  const [appliedSplits, setAppliedSplits] = useState<SplitPaymentEntry[]>([]);
+  const [promoRules, setPromoRules] = useState<PromotionRule[]>([]);
+  const [printerOnOff, setPrinterOnOff] = useState(false);
+  const [outboxCount, setOutboxCount] = useState(0);
+  const [showFloatModal, setShowFloatModal] = useState(false);
+  const [floatInput, setFloatInput] = useState("2000");
   const [statusMessage, setStatusMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -137,16 +197,60 @@ export function PosClassicClient({
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
+      const arr = raw ? (JSON.parse(raw) as unknown[]) : [];
+      setOutboxCount(arr.length);
+    } catch {
+      setOutboxCount(0);
+    }
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((data: { settings?: Record<string, { rules?: PromotionRule[] }> }) => {
+        const rules = data.settings?.promotion_rules?.rules;
+        if (Array.isArray(rules)) setPromoRules(rules);
+      })
+      .catch(() => {});
+    if (session) {
+      fetch("/api/settings/printers")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data: { config?: { onOff?: boolean } } | null) => {
+          if (data?.config?.onOff !== undefined) setPrinterOnOff(Boolean(data.config.onOff));
+        })
+        .catch(() => {});
+    }
+  }, [session]);
+
   // ---- derived values -------------------------------------------------------
+  const promoResult = useMemo(
+    () =>
+      applyPromotionRules(
+        cart.map((c) => ({
+          sku: c.item.sku,
+          categoryC1: c.item.categoryC1,
+          quantity: c.quantity,
+          unitPriceHkd: c.item.unitPriceHkd,
+          discountRate: c.discountRate,
+        })),
+        promoRules,
+      ),
+    [cart, promoRules],
+  );
+
   const totals = calculateBillTotals(
     cart.map((c, idx) => ({
       sku: c.item.sku,
       quantity: c.quantity,
       unitPriceHkd: c.item.unitPriceHkd,
-      discountRate: c.discountRate,
+      discountRate: promoRules.length > 0 ? (promoResult.lines[idx]?.discountRate ?? c.discountRate) : c.discountRate,
       dk: idx + 1,
     })),
   );
+
+  const netPayableHkd = Math.max(0, Number((totals.netAmountHkd - promoResult.billDiscountHkd).toFixed(2)));
+  const splitPaidTotal = Number(appliedSplits.reduce((s, p) => s + p.amountHkd, 0).toFixed(2));
+  const remainingDue = Math.max(0, Number((netPayableHkd - splitPaidTotal).toFixed(2)));
 
   const crm = calculateCrmPoints(
     cart.map((c, idx) => ({
@@ -159,15 +263,16 @@ export function PosClassicClient({
     selectedCustomer?.pointsBalance ?? 0,
   );
 
-  const octopusValidation = validateOctopusAmountHkd(totals.netAmountHkd);
+  const octopusTargetAmount = remainingDue > 0 ? remainingDue : netPayableHkd;
+  const octopusValidation = validateOctopusAmountHkd(octopusTargetAmount);
   const selectedLine = cart.find((c) => c.item.sku === selectedSku) ?? null;
   const grossAmount = totals.grossAmountHkd;
-  const lineDiscountTotal = totals.discountAmountHkd;
+  const lineDiscountTotal = Number((totals.discountAmountHkd + promoResult.billDiscountHkd).toFixed(2));
 
   const cashTendered = Number(entryBuffer);
   const changeDue =
-    tenderMode && selectedTender === "CASH" && cashTendered > totals.netAmountHkd
-      ? cashTendered - totals.netAmountHkd
+    tenderMode && selectedTender === "CASH" && cashTendered > remainingDue
+      ? cashTendered - remainingDue
       : 0;
 
   const quickButtons = useMemo(() => {
@@ -179,26 +284,67 @@ export function PosClassicClient({
   }, [menus, products, activeMenuId]);
 
   // ---- data helpers ---------------------------------------------------------
-  async function runProductSearch(q: string) {
+  async function runProductSearch(q: string, page = 1) {
     setProductQuery(q);
-    const res = await fetch(`/api/products?q=${encodeURIComponent(q)}&limit=60`);
-    if (res.ok) {
-      const data = (await res.json()) as { items: PosProduct[] };
-      setProducts(data.items);
+    setPickerLoading(true);
+    try {
+      const res = await fetch(`/api/products?q=${encodeURIComponent(q)}&page=${page}&pageSize=12`);
+      if (res.ok) {
+        const data = (await res.json()) as { items: PosProduct[]; total: number; page: number };
+        setProducts(data.items);
+        setProductTotal(data.total);
+        setProductPage(data.page);
+      }
+    } finally {
+      setPickerLoading(false);
     }
   }
 
-  async function runCustomerSearch(q: string) {
+  async function runCustomerSearch(q: string, page = 1) {
     setCustomerQuery(q);
-    const res = await fetch(`/api/customers?q=${encodeURIComponent(q)}&limit=30`);
-    if (res.ok) {
-      const data = (await res.json()) as { customers: PosCustomer[] };
-      setCustomers(data.customers);
+    setPickerLoading(true);
+    try {
+      const res = await fetch(`/api/customers?q=${encodeURIComponent(q)}&page=${page}&pageSize=12`);
+      if (res.ok) {
+        const data = (await res.json()) as { customers: PosCustomer[]; total: number; page: number };
+        setCustomers(data.customers);
+        setCustomerTotal(data.total);
+        setCustomerPage(data.page);
+      }
+    } finally {
+      setPickerLoading(false);
     }
   }
+
+  async function runStaffSearch(q: string, page = 1) {
+    setStaffQuery(q);
+    setPickerLoading(true);
+    try {
+      const res = await fetch(`/api/staff?q=${encodeURIComponent(q)}&page=${page}&pageSize=12`);
+      if (res.ok) {
+        const data = (await res.json()) as { items: PosStaff[]; total: number; page: number };
+        setStaffItems(data.items);
+        setStaffTotal(data.total);
+        setStaffPage(data.page);
+      }
+    } finally {
+      setPickerLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (activePanel === "products") void runProductSearch(productQuery, productPage);
+    if (activePanel === "members") void runCustomerSearch(customerQuery, customerPage);
+    if (activePanel === "staff") void runStaffSearch(staffQuery, staffPage);
+  }, [activePanel]);
 
   function showMsg(code: string, text: string) {
+    setCompletedInvoiceNo(null);
     setMsg({ code, text });
+  }
+
+  function showLegacyMsg(code: string, values: Record<string, string | number> = {}) {
+    showMsg(code, formatLegacyMessage(code, language, values));
   }
 
   // ---- cart operations ------------------------------------------------------
@@ -240,13 +386,32 @@ export function PosClassicClient({
     setEntryBuffer("");
   }
 
-  /** Barcode entry ( keypad Enter / 條碼 field ): VB6 msg 017 on unknown code. */
-  function commitBarcode(raw?: string) {
+  /** Barcode / UBC entry ( keypad Enter / 條碼 field ): VB6 msg 017 on unknown code. */
+  async function commitBarcode(raw?: string) {
     const code = (raw ?? entryBuffer).trim();
     if (!code) return;
-    const hit = products.find((p) => p.sku.toLowerCase() === code.toLowerCase());
+    const lower = code.toLowerCase();
+    let hit = products.find(
+      (p) => p.sku.toLowerCase() === lower || Boolean(p.ubc && p.ubc.toLowerCase() === lower),
+    );
     if (!hit) {
-      showMsg("017", `${code} - 條碼編號不存在，請輸入另一編號！`);
+      const exactRes = await fetch(`/api/products?exactCode=${encodeURIComponent(code)}`);
+      if (exactRes.ok) {
+        const exactData = (await exactRes.json()) as { item: PosProduct | null };
+        if (exactData.item) hit = exactData.item;
+      }
+    }
+    if (!hit) {
+      const res = await fetch(`/api/products?q=${encodeURIComponent(code)}&page=1&pageSize=200`);
+      if (res.ok) {
+        const data = (await res.json()) as { items: PosProduct[] };
+        hit = data.items.find(
+          (p) => p.sku.toLowerCase() === lower || Boolean(p.ubc && p.ubc.toLowerCase() === lower),
+        );
+      }
+    }
+    if (!hit) {
+      showLegacyMsg("017", { barcode: code });
       return;
     }
     addItem(hit);
@@ -261,7 +426,11 @@ export function PosClassicClient({
   /** 項折: cycle the selected line's discount rate. */
   function cycleLineDiscount() {
     if (!selectedLine) {
-      showMsg("021", "請先選擇貨品項目！");
+      showLegacyMsg("021");
+      return;
+    }
+    if (selectedLine.item.isFixedPrice || selectedLine.item.allowItemDiscount === false) {
+      showLegacyMsg("026");
       return;
     }
     const next = nextDiscount(selectedLine.discountRate);
@@ -272,33 +441,49 @@ export function PosClassicClient({
     setStatusMessage(`${selectedLine.item.sku} 項折 ${(next * 100).toFixed(0)}%`);
   }
 
-  /** 單折: apply one discount rate to every line. */
+  /** 單折: apply one discount rate to every discountable line. */
   function applyBillDiscount() {
     if (cart.length === 0) {
-      showMsg("022", "帳單沒有貨品項目！");
+      showLegacyMsg("022");
       return;
     }
-    const rate = nextDiscount(cart[0]?.discountRate ?? 0);
+    const eligible = cart.filter((c) => !c.item.isFixedPrice && c.item.allowItemDiscount !== false);
+    if (eligible.length === 0) {
+      showLegacyMsg("026");
+      return;
+    }
+    const rate = nextDiscount(eligible[0]?.discountRate ?? 0);
     setOctopusApprovedInfo(null);
-    setCart((prev) => prev.map((c) => ({ ...c, discountRate: rate })));
-    setStatusMessage(`單折 ${(rate * 100).toFixed(0)}% 已套用全單`);
+    setCart((prev) =>
+      prev.map((c) =>
+        c.item.isFixedPrice || c.item.allowItemDiscount === false ? c : { ...c, discountRate: rate },
+      ),
+    );
+    setStatusMessage(`單折 ${(rate * 100).toFixed(0)}% 已套用可折貨品`);
   }
 
-  /** 送貨: flag the bill for delivery (goes into remarks, same as legacy note). */
+  /** 送貨: toggle delivery order mode & sync note tag. */
   function flagDelivery() {
-    setNotes((prev) => (prev.includes("送貨") ? prev : `送貨 ${prev}`.trim()));
-    setStatusMessage("此單已標記送貨（寫入備註）");
+    setIsDelivery((prev) => {
+      const next = !prev;
+      setNotes((cur) => {
+        const cleaned = cur.replace(/^送貨\s*/, "").trim();
+        return next ? `送貨 ${cleaned}`.trim() : cleaned;
+      });
+      setStatusMessage(next ? "此單已標記送貨（將會建立提貨單）" : "已取消送貨標記");
+      return next;
+    });
   }
 
   /** 改價: override the selected line price with the keypad buffer (as discount rate). */
   function overridePrice() {
     if (!selectedLine) {
-      showMsg("021", "請先選擇貨品項目！");
+      showLegacyMsg("021");
       return;
     }
     const target = Number(entryBuffer);
     if (!target || target <= 0 || target > selectedLine.item.unitPriceHkd) {
-      showMsg("023", "請先用數字鍵輸入新單價！");
+      showLegacyMsg("023");
       return;
     }
     const rate = Math.round((1 - target / selectedLine.item.unitPriceHkd) * 10000) / 10000;
@@ -316,10 +501,14 @@ export function PosClassicClient({
     const hit = code ? products.find((p) => p.sku.toLowerCase() === code.toLowerCase()) : null;
     const item = hit ?? selectedLine?.item ?? null;
     if (!item) {
-      showMsg("024", "請先輸入條碼或選擇貨品項目！");
+      showLegacyMsg("024");
       return;
     }
-    showMsg("025", `${item.sku}\n${item.nameZh || item.nameEn}\n單價：${formatHkd(item.unitPriceHkd)}`);
+    showLegacyMsg("025", {
+      barcode: item.sku,
+      name: item.nameZh || item.nameEn,
+      price: formatHkd(item.unitPriceHkd),
+    });
   }
 
   /** 重選: clear keypad buffer, pending quantity and line selection. */
@@ -333,6 +522,158 @@ export function PosClassicClient({
   /** 退售: toggle return mode (XC=9). */
   function toggleReturnMode() {
     setDocType((prev) => (prev === "SALES_RETURN" ? "RETAIL_SALE" : "SALES_RETURN"));
+  }
+
+  function loadQueriedBill(detail: ReceiptDetail, action: "modify" | "reorder") {
+    setCart(
+      detail.lines.filter((line) => !line.cancelled && line.dk > 0).map((line) => ({
+        item: {
+          sku: line.sku,
+          nameZh: line.nameZh,
+          nameEn: line.nameEn,
+          categoryC1: line.categoryC1,
+          unitPriceHkd: line.unitPriceHkd,
+          excludeFromCrmBonus: false,
+        },
+        quantity: line.quantity,
+        discountRate: line.discountRate,
+      })),
+    );
+    setDocType(detail.bill.docType as BillDocType);
+    setSelectedSku(null);
+    if (detail.bill.customer?.id) {
+      setSelectedCustomer({
+        id: detail.bill.customer.id,
+        legacyId: detail.bill.customer.legacyId,
+        nameZh: detail.bill.customer.nameZh,
+        nameEn: detail.bill.customer.nameEn,
+        phone: detail.bill.customer.phone,
+        pointsBalance: detail.bill.customer.pointsBalance ?? 0,
+      });
+    } else {
+      setSelectedCustomer(null);
+    }
+    setIsDelivery(detail.bill.deliveryStatus === "pending");
+    setAppliedSplits([]);
+    setTenderMode(false);
+    setEditingInvoiceNo(action === "modify" ? detail.bill.invoiceNo : null);
+    setNotes(action === "modify" ? `修改原單 ${detail.bill.invoiceNo}` : `加訂原單 ${detail.bill.invoiceNo}`);
+    setActivePanel("quickpick");
+    setShowBillQuery(false);
+    setStatusMessage(`${action === "modify" ? "修改" : "加訂"}單據 ${detail.bill.invoiceNo} 已載入收銀台`);
+  }
+
+  function addSplitPayment() {
+    if (remainingDue <= 0) return;
+    if (selectedTender === "UNPAID_INVOICE") {
+      setStatusMessage("掛單不可加入部分收款清單，請選其他付款方式或直接完成開票");
+      return;
+    }
+    const rawAmt = entryBuffer.trim() ? Number(entryBuffer) : remainingDue;
+    if (!Number.isFinite(rawAmt) || rawAmt <= 0) {
+      setStatusMessage("請輸入有效的部分付款金額");
+      return;
+    }
+    if (selectedTender !== "CASH" && rawAmt > remainingDue + 0.001) {
+      setStatusMessage(`非現金付款不可超過尚欠餘額 ${formatHkd(remainingDue)}`);
+      return;
+    }
+    if (selectedTender === "OCTOPUS" && !octopusApprovedInfo) {
+      showLegacyMsg("101");
+      return;
+    }
+    const appliedAmt = Math.min(rawAmt, remainingDue);
+    setAppliedSplits((prev) => [
+      ...prev,
+      {
+        id: `sp-${Date.now()}-${prev.length}`,
+        tenderCode: selectedTender as TenderCode,
+        amountHkd: Number(appliedAmt.toFixed(2)),
+        approvalCode: approvalCode.trim() || undefined,
+        cardLast4: cardLast4.length === 4 ? cardLast4 : undefined,
+        octopusCardId: selectedTender === "OCTOPUS" ? octopusApprovedInfo?.cardId : undefined,
+        octopusDeviceId: selectedTender === "OCTOPUS" ? octopusApprovedInfo?.deviceId : undefined,
+        octopusRemainingHkd: selectedTender === "OCTOPUS" ? octopusApprovedInfo?.remainingHkd : undefined,
+        remarks: selectedTender === "CASH" && rawAmt > appliedAmt ? `Cash tendered ${rawAmt}` : undefined,
+      },
+    ]);
+    setEntryBuffer("");
+    setApprovalCode("");
+    setCardLast4("");
+    setOctopusApprovedInfo(null);
+    setStatusMessage(`已加入 ${selectedTender} ${formatHkd(appliedAmt)}`);
+  }
+
+  async function openCashDrawerNoSale() {
+    if (!bridgeToken) {
+      setStatusMessage("請先登入再開啟錢柜");
+      return;
+    }
+    try {
+      const res = await fetch(`${bridgeUrl}/drawer/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Bridge-Token": bridgeToken },
+        body: JSON.stringify({ requestId: `nosale-${Date.now()}`, reason: "NO_SALE_AUTH" }),
+      });
+      setStatusMessage(res.ok ? "錢柜已開啟（No Sale）" : `錢柜開啟失敗 (${res.status})`);
+    } catch {
+      setStatusMessage("無法連接本機硬件橋接 127.0.0.1:17880");
+    }
+  }
+
+  async function saveOpeningFloat() {
+    const amountHkd = Number(floatInput);
+    if (!Number.isFinite(amountHkd) || amountHkd < 0) return;
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Hong_Kong" }).format(new Date());
+    const res = await fetch("/api/day-end", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "SET_FLOAT", businessDate: today, amountHkd }),
+    });
+    if (res.ok) {
+      setShowFloatModal(false);
+      setStatusMessage(`今日銀頭已設定為 ${formatHkd(amountHkd)}`);
+    } else {
+      const d = (await res.json().catch(() => ({}))) as { error?: string };
+      setStatusMessage(d.error ?? "設定銀頭失敗");
+    }
+  }
+
+  async function settleOctopusXfile() {
+    const res = await fetch("/api/octopus/settle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runOsdxcExchange: false }),
+    });
+    const d = (await res.json().catch(() => ({}))) as { xfileName?: string; txnCount?: number; error?: string };
+    setStatusMessage(res.ok ? `八達通 XFile 結算完成：${d.xfileName} (${d.txnCount ?? 0} 筆)` : d.error ?? "八達通結算失敗");
+  }
+
+  async function flushOfflineOutbox() {
+    const raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
+    const queued = raw ? (JSON.parse(raw) as unknown[]) : [];
+    if (queued.length === 0) {
+      setStatusMessage("離線佇列沒有待重送單據");
+      return;
+    }
+    const remaining: unknown[] = [];
+    let synced = 0;
+    for (const item of queued) {
+      try {
+        const res = await fetch("/api/bills", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(item),
+        });
+        if (res.ok) synced++;
+        else remaining.push(item);
+      } catch {
+        remaining.push(item);
+      }
+    }
+    localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(remaining));
+    setOutboxCount(remaining.length);
+    setStatusMessage(`已重送 ${synced} 筆離線單據，剩餘 ${remaining.length} 筆`);
   }
 
   // ---- Octopus bridge (unchanged logic) --------------------------------------
@@ -386,81 +727,115 @@ export function PosClassicClient({
     }
   }
 
-  // ---- submit (unchanged logic) ----------------------------------------------
-  async function submitBill() {
-    if (cart.length === 0) return; // VB6: 完成 greyed on empty bill
+  // ---- submit (supports completed, held, supersede/amend, split tender, delivery)
+  async function submitBill(mode: "completed" | "held" = "completed") {
+    if (cart.length === 0 || submitting) return;
     if (!session) {
-      showMsg("401", "請先登入收銀員帳號！");
+      showLegacyMsg("401");
       return;
     }
-    if (selectedCustomer && !crm.redemptionAllowed) {
-      showMsg("044", crm.redemptionError ?? "會員積分不足！");
+    if (mode === "completed" && selectedCustomer && !crm.redemptionAllowed) {
+      showLegacyMsg("044");
       return;
     }
-    if (octopusLockCardId) {
-      showMsg("100", `此單被八達通 100022 鎖定（卡 ${octopusLockCardId}），請先重拍同一張卡！`);
+    if (mode === "completed" && octopusLockCardId) {
+      showLegacyMsg("100", { cardId: octopusLockCardId });
+      return;
+    }
+    if (
+      mode === "completed" &&
+      remainingDue > 0.005 &&
+      selectedTender === "CASH" &&
+      entryBuffer.trim() !== "" &&
+      (!Number.isFinite(cashTendered) || cashTendered < remainingDue)
+    ) {
+      showLegacyMsg("102");
       return;
     }
 
     const effectiveDocType: BillDocType =
-      selectedTender === "UNPAID_INVOICE" ? "SALES_INVOICE" : docType;
+      mode === "held"
+        ? docType
+        : selectedTender === "UNPAID_INVOICE"
+          ? "SALES_INVOICE"
+          : docType;
 
     const initialPayments = [];
-    if (selectedTender === "UNPAID_INVOICE") {
-      if (depositMode !== "NONE" && Number(depositAmount) > 0) {
+    if (mode === "completed") {
+      for (const sp of appliedSplits) {
         initialPayments.push({
-          clientIdempotencyKey: `pmt-${Date.now()}`,
-          tenderCode: depositMode,
-          amountHkd: Number(depositAmount),
-          approvalCode: approvalCode.trim() || undefined,
-          cardLast4: cardLast4.length === 4 ? cardLast4 : undefined,
-          remarks: "Initial invoice deposit",
+          clientIdempotencyKey: `pmt-${Date.now()}-${sp.id}`,
+          tenderCode: sp.tenderCode,
+          amountHkd: sp.amountHkd,
+          approvalCode: sp.approvalCode,
+          cardLast4: sp.cardLast4,
+          octopusCardId: sp.octopusCardId,
+          octopusDeviceId: sp.octopusDeviceId,
+          octopusRemainingHkd: sp.octopusRemainingHkd,
+          remarks: sp.remarks,
         });
       }
-    } else if (selectedTender === "OCTOPUS") {
-      if (!octopusApprovedInfo) {
-        showMsg("101", "請先在八達通讀卡器拍卡！");
-        return;
+      if (remainingDue > 0.005) {
+        if (selectedTender === "UNPAID_INVOICE") {
+          if (appliedSplits.length === 0 && depositMode !== "NONE" && Number(depositAmount) > 0) {
+            initialPayments.push({
+              clientIdempotencyKey: `pmt-${Date.now()}`,
+              tenderCode: depositMode,
+              amountHkd: Number(depositAmount),
+              approvalCode: approvalCode.trim() || undefined,
+              cardLast4: cardLast4.length === 4 ? cardLast4 : undefined,
+              remarks: "Initial invoice deposit",
+            });
+          }
+        } else if (selectedTender === "OCTOPUS") {
+          if (!octopusApprovedInfo) {
+            showLegacyMsg("101");
+            return;
+          }
+          initialPayments.push({
+            clientIdempotencyKey: `pmt-${Date.now()}`,
+            tenderCode: "OCTOPUS" as const,
+            amountHkd: remainingDue,
+            octopusCardId: octopusApprovedInfo.cardId,
+            octopusDeviceId: octopusApprovedInfo.deviceId,
+            octopusRemainingHkd: octopusApprovedInfo.remainingHkd,
+          });
+        } else {
+          initialPayments.push({
+            clientIdempotencyKey: `pmt-${Date.now()}`,
+            tenderCode: selectedTender as TenderCode,
+            amountHkd: remainingDue,
+            approvalCode: approvalCode.trim() || undefined,
+            cardLast4: cardLast4.length === 4 ? cardLast4 : undefined,
+            remarks:
+              selectedTender === "CASH" && cashTendered > remainingDue
+                ? `Cash tendered ${cashTendered}`
+                : undefined,
+          });
+        }
       }
-      initialPayments.push({
-        clientIdempotencyKey: `pmt-${Date.now()}`,
-        tenderCode: "OCTOPUS" as const,
-        amountHkd: totals.netAmountHkd,
-        octopusCardId: octopusApprovedInfo.cardId,
-        octopusDeviceId: octopusApprovedInfo.deviceId,
-        octopusRemainingHkd: octopusApprovedInfo.remainingHkd,
-      });
-    } else {
-      initialPayments.push({
-        clientIdempotencyKey: `pmt-${Date.now()}`,
-        tenderCode: selectedTender as TenderCode,
-        amountHkd: totals.netAmountHkd,
-        approvalCode: approvalCode.trim() || undefined,
-        cardLast4: cardLast4.length === 4 ? cardLast4 : undefined,
-        remarks:
-          selectedTender === "CASH" && cashTendered > totals.netAmountHkd
-            ? `Cash tendered ${cashTendered}`
-            : undefined,
-      });
     }
 
     const payload = {
       clientIdempotencyKey: `bill-${crypto.randomUUID()}`,
-      shopId: session.shopId || 1,
-      terminalId: 2,
+      shopId: storeContext?.shopId ?? session.shopId ?? 1,
+      terminalId: storeContext?.terminalId,
       docType: effectiveDocType,
+      status: mode,
+      supersedeInvoiceNo: editingInvoiceNo ?? undefined,
+      createDeliveryOrder: mode === "completed" && isDelivery,
       customerId: selectedCustomer?.id,
       customerCurrentPoints: selectedCustomer?.pointsBalance ?? 0,
-      lines: cart.map((c) => ({
+      lines: cart.map((c, idx) => ({
         sku: c.item.sku,
         nameZh: c.item.nameZh,
         nameEn: c.item.nameEn,
         categoryC1: c.item.categoryC1,
         quantity: c.quantity,
         unitPriceHkd: c.item.unitPriceHkd,
-        discountRate: c.discountRate,
+        discountRate: promoRules.length > 0 ? (promoResult.lines[idx]?.discountRate ?? c.discountRate) : c.discountRate,
         lineDiscountAmountHkd: 0,
-        isFixedPrice: false,
+        isFixedPrice: Boolean(c.item.isFixedPrice),
         excludeFromCrmBonus: Boolean(c.item.excludeFromCrmBonus),
       })),
       initialPayments,
@@ -480,11 +855,30 @@ export function PosClassicClient({
         return;
       }
 
-      if (selectedTender === "CASH" && bridgeToken) {
+      const hasCash = initialPayments.some((p) => p.tenderCode === "CASH");
+      if (mode === "completed" && hasCash && bridgeToken) {
         fetch(`${bridgeUrl}/drawer/open`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Bridge-Token": bridgeToken },
           body: JSON.stringify({ requestId: payload.clientIdempotencyKey, reason: "CASH_SALE" }),
+        }).catch(() => {});
+      }
+      if (mode === "completed" && printerOnOff && bridgeToken) {
+        const receiptLines = [
+          "HONG KONG HARP CENTRE",
+          `${data.docType} ${data.invoiceNo}`,
+          ...payload.lines.map((l) => `${l.nameZh || l.nameEn} x${l.quantity} ${formatHkd(l.unitPriceHkd)}`),
+          `TOTAL ${formatHkd(data.netAmountHkd)}`,
+        ];
+        fetch(`${bridgeUrl}/print/receipt`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Bridge-Token": bridgeToken },
+          body: JSON.stringify({
+            requestId: payload.clientIdempotencyKey,
+            invoiceNo: data.invoiceNo,
+            lines: receiptLines,
+            openCashDrawer: hasCash,
+          }),
         }).catch(() => {});
       }
 
@@ -492,19 +886,32 @@ export function PosClassicClient({
       setCart([]);
       setSelectedSku(null);
       setTenderMode(false);
+      setAppliedSplits([]);
+      setIsDelivery(false);
       setOctopusApprovedInfo(null);
       setApprovalCode("");
       setCardLast4("");
       setDepositAmount("");
       setNotes("");
+      setEditingInvoiceNo(null);
       setEntryBuffer("");
-      showMsg("000", `帳單 ${data.invoiceNo} 已完成。\n狀態：${data.paymentStatus.toUpperCase()} · 餘額 ${formatHkd(data.balanceDueHkd)}`);
+      if (mode === "held") {
+        setStatusMessage(`暫停單 ${data.invoiceNo} 已儲存（於查單 [暫停單] 恢復）`);
+      } else {
+        showLegacyMsg("000", {
+          invoiceNo: data.invoiceNo,
+          status: data.paymentStatus.toUpperCase(),
+          balance: formatHkd(data.balanceDueHkd),
+        });
+        setCompletedInvoiceNo(data.invoiceNo);
+      }
     } catch {
       const existingRaw = localStorage.getItem(OFFLINE_QUEUE_KEY);
       const queued = existingRaw ? (JSON.parse(existingRaw) as unknown[]) : [];
       queued.push(payload);
       localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queued));
-      showMsg("999", "伺服器離線 — 交易已存入本機離線佇列，稍後重試。");
+      setOutboxCount(queued.length);
+      showLegacyMsg("999");
     } finally {
       setSubmitting(false);
     }
@@ -515,6 +922,38 @@ export function PosClassicClient({
     router.push("/login");
     router.refresh();
   }
+
+  useEffect(() => {
+    function handleLegacyKeys(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        return;
+      }
+      const modalOpen = Boolean(msg || supportKind || officeTxnType || activeReport || showPassword || showPrinter || showStock || showBillQuery || showAbout);
+      if (modalOpen) return;
+      if (event.ctrlKey && event.key.toLowerCase() === "w") {
+        event.preventDefault();
+        priceEnquiry();
+      } else if (event.key === "F1") {
+        event.preventDefault();
+        router.push("/");
+      } else if (event.key === "F4") {
+        event.preventDefault();
+        overridePrice();
+      } else if (event.key === "F5" || event.key === "F6") {
+        event.preventDefault();
+        setTenderMode((value) => !value);
+      } else if (event.key === "F8") {
+        event.preventDefault();
+        reselect();
+      } else if (event.key === "F12") {
+        event.preventDefault();
+        void submitBill();
+      }
+    }
+    window.addEventListener("keydown", handleLegacyKeys);
+    return () => window.removeEventListener("keydown", handleLegacyKeys);
+  });
 
   // ===========================================================================
   //  RENDER — legacy VB6 chrome
@@ -546,7 +985,7 @@ export function PosClassicClient({
         <button type="button" className={toolbarBtn} onClick={() => setShowBillQuery(true)} title="查單">
           <span className="text-[18px]">🧾</span>查單
         </button>
-        <button type="button" className={toolbarBtn} onClick={() => router.push("/backoffice/stock")} title="存貨">
+        <button type="button" className={toolbarBtn} onClick={() => setShowStock(true)} title="存貨">
           <span className="text-[18px]">📦</span>存貨
         </button>
         <button
@@ -583,7 +1022,17 @@ export function PosClassicClient({
         <button type="button" className={toolbarBtn} onClick={() => setActivePanel("info")} title="資訊">
           <span className="text-[18px]">📋</span>資訊
         </button>
-        <div className="ml-auto flex items-center pr-3 text-right">
+        <div className="ml-auto flex items-center gap-2 pr-3 text-right">
+          <select
+            aria-label="介面語言"
+            value={language}
+            onChange={(event) => setLanguage(event.target.value as LegacyLanguage)}
+            className="border border-[#aca899] bg-white px-1 py-0.5 text-[11px] text-black"
+          >
+            <option value="TC">繁體</option>
+            <option value="SC">简体</option>
+            <option value="ENG">ENG</option>
+          </select>
           <div>
             <div className="text-[15px] font-bold italic text-[#2e7ec2]">eRun</div>
             <div className="text-[9px] tracking-wide text-[#2e7ec2]">POS-Cloud V3.3</div>
@@ -593,7 +1042,9 @@ export function PosClassicClient({
 
       {/* ── 2. status strip ────────────────────────────────────────────── */}
       <div className="flex items-center border-b border-[#d4d0c8] bg-[#f0f0f0] text-[12px] text-black">
-        <span className="border-r border-[#d4d0c8] px-2 py-0.5">Central({session?.shopId ?? 1})</span>
+        <span className="border-r border-[#d4d0c8] px-2 py-0.5">
+          {storeContext?.shopNameEn ?? "Central"}({storeContext?.legacySn ?? 1})
+        </span>
         <span className="border-r border-[#d4d0c8] px-2 py-0.5">{session?.displayName ?? "未登入"}</span>
         <span className="border-r border-[#d4d0c8] px-2 py-0.5">{dateStr}</span>
         <span className="border-r border-[#d4d0c8] px-2 py-0.5">{timeStr}</span>
@@ -602,6 +1053,8 @@ export function PosClassicClient({
             會員：{selectedCustomer.nameZh || selectedCustomer.nameEn}（{selectedCustomer.pointsBalance} 分）
           </span>
         ) : null}
+        {isDelivery ? <span className="border-r border-[#d4d0c8] bg-[#fff3c4] px-2 py-0.5 font-bold">送貨</span> : null}
+        {editingInvoiceNo ? <span className="px-2 py-0.5 text-[#c00000]">修改：{editingInvoiceNo}</span> : null}
         <span className="ml-auto px-2 py-0.5 font-bold">{modeLabel}</span>
       </div>
 
@@ -612,7 +1065,7 @@ export function PosClassicClient({
           <div className="flex items-center gap-1 border-b border-[#d4d0c8] p-1">
             <input
               value={entryBuffer}
-              onChange={(e) => setEntryBuffer(e.target.value.replace(/[^\d.]/g, ""))}
+              onChange={(e) => setEntryBuffer(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") commitBarcode();
               }}
@@ -694,7 +1147,7 @@ export function PosClassicClient({
                 <div className="flex justify-between">
                   <span>客付</span>
                   <span>{TENDERS.find((t) => t.key === selectedTender)?.zh ?? ""}</span>
-                  <span className="font-mono">{selectedTender === "CASH" ? (entryBuffer || "0.0") : formatHkd(totals.netAmountHkd)}</span>
+                  <span className="font-mono">{selectedTender === "CASH" ? (entryBuffer || "0.0") : formatHkd(remainingDue)}</span>
                 </div>
                 <div className="mt-2 flex items-end justify-between">
                   <span className="font-bold text-[#2e7ec2]">應找</span>
@@ -717,7 +1170,7 @@ export function PosClassicClient({
               </div>
               <div className="text-right">
                 <div className="text-[14px] font-bold">總計</div>
-                <div className="font-mono text-[26px] font-bold leading-none">{formatHkd(totals.netAmountHkd)}</div>
+                <div className="font-mono text-[26px] font-bold leading-none">{formatHkd(netPayableHkd)}</div>
               </div>
             </div>
           </div>
@@ -767,100 +1220,73 @@ export function PosClassicClient({
             ) : null}
 
             {activePanel === "products" ? (
-              <div>
-                <div className="sticky top-0 border-b border-[#aca899] bg-[#e8eef5] px-2 py-1 text-center text-[12px] font-bold text-black">
-                  貨品 [1/{products.length}]
-                </div>
-                <div className="p-1">
-                  <input
-                    value={productQuery}
-                    onChange={(e) => void runProductSearch(e.target.value)}
-                    placeholder="搜尋貨品…"
-                    className="mb-1 w-full border border-[#aca899] px-1 py-1 text-[12px]"
-                  />
-                </div>
-                {products.map((p) => (
-                  <button
-                    key={p.sku}
-                    type="button"
-                    onClick={() => addItem(p)}
-                    className="flex w-full justify-between border-b border-[#e0e0e0] px-2 py-1 text-left text-[12px] text-black hover:bg-[#316ac5] hover:text-white"
-                  >
-                    <span className="font-mono">{p.sku}</span>
-                    <span className="mx-2 flex-1 truncate">{p.nameZh || p.nameEn}</span>
-                    <span className="font-mono">{formatHkd(p.unitPriceHkd)}</span>
-                  </button>
-                ))}
-              </div>
+              <LegacyPicker
+                title="貨品"
+                items={products}
+                total={productTotal}
+                page={productPage}
+                pageSize={12}
+                query={productQuery}
+                loading={pickerLoading}
+                getKey={(product) => product.sku}
+                columns={[
+                  { header: "條碼", render: (product) => product.sku },
+                  { header: "貨品", render: (product) => product.nameZh || product.nameEn },
+                  { header: "單價", numeric: true, render: (product) => formatHkd(product.unitPriceHkd) },
+                ]}
+                onQueryChange={(query) => void runProductSearch(query, 1)}
+                onPageChange={(page) => void runProductSearch(productQuery, page)}
+                onSelect={addItem}
+              />
             ) : null}
 
             {activePanel === "members" ? (
-              <div>
-                <div className="sticky top-0 border-b border-[#aca899] bg-[#e8eef5] px-2 py-1 text-center text-[12px] font-bold text-black">
-                  會員 [1/{customers.length}]
-                </div>
-                <div className="p-1">
-                  <input
-                    value={customerQuery}
-                    onChange={(e) => void runCustomerSearch(e.target.value)}
-                    placeholder="搜尋會員…"
-                    className="mb-1 w-full border border-[#aca899] px-1 py-1 text-[12px]"
-                  />
-                </div>
-                <table className="w-full border-collapse text-[12px]">
-                  <thead>
-                    <tr className="bg-[#e8eef5] text-left text-black">
-                      <th className="px-2 py-0.5 font-normal">號碼</th>
-                      <th className="px-2 py-0.5 font-normal">姓名</th>
-                      <th className="px-2 py-0.5 font-normal">電話</th>
-                      <th className="px-2 py-0.5 text-right font-normal">積分</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {customers.map((c) => (
-                      <tr
-                        key={c.id}
-                        onClick={() => {
-                          setSelectedCustomer(selectedCustomer?.id === c.id ? null : c);
-                          setStatusMessage(
-                            selectedCustomer?.id === c.id ? "已取消會員" : `會員：${c.nameZh || c.nameEn}`,
-                          );
-                        }}
-                        className={`cursor-pointer ${selectedCustomer?.id === c.id ? "bg-[#316ac5] text-white" : "hover:bg-[#eaf3fb]"}`}
-                      >
-                        <td className="px-2 py-1 font-mono">{c.legacyId}</td>
-                        <td className="px-2 py-1">{c.nameZh || c.nameEn}</td>
-                        <td className="px-2 py-1 font-mono">{c.phone || "-"}</td>
-                        <td className="px-2 py-1 text-right font-mono">{c.pointsBalance}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <LegacyPicker
+                title="會員"
+                items={customers}
+                total={customerTotal}
+                page={customerPage}
+                pageSize={12}
+                query={customerQuery}
+                loading={pickerLoading}
+                selectedKey={selectedCustomer?.id}
+                getKey={(customer) => customer.id}
+                columns={[
+                  { header: "號碼", render: (customer) => customer.legacyId },
+                  { header: "姓名", render: (customer) => customer.nameZh || customer.nameEn },
+                  { header: "電話", render: (customer) => customer.phone || "-" },
+                  { header: "積分", numeric: true, render: (customer) => customer.pointsBalance },
+                ]}
+                onQueryChange={(query) => void runCustomerSearch(query, 1)}
+                onPageChange={(page) => void runCustomerSearch(customerQuery, page)}
+                onSelect={(customer) => {
+                  const deselect = selectedCustomer?.id === customer.id;
+                  setSelectedCustomer(deselect ? null : customer);
+                  setStatusMessage(deselect ? "已取消會員" : `會員：${customer.nameZh || customer.nameEn}`);
+                }}
+              />
             ) : null}
 
             {activePanel === "staff" ? (
-              <div>
-                <div className="sticky top-0 border-b border-[#aca899] bg-[#e8eef5] px-2 py-1 text-center text-[12px] font-bold text-black">
-                  職員 [1/1]
-                </div>
-                <table className="w-full border-collapse text-[12px]">
-                  <thead>
-                    <tr className="bg-[#e8eef5] text-left text-black">
-                      <th className="px-2 py-0.5 font-normal">號碼</th>
-                      <th className="px-2 py-0.5 font-normal">姓名</th>
-                      <th className="px-2 py-0.5 font-normal">級別</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr className="bg-[#fff8dc]">
-                      <td className="px-2 py-1 font-mono">{session?.shopId ?? 1}001</td>
-                      <td className="px-2 py-1">{session?.displayName ?? "未登入"}</td>
-                      <td className="px-2 py-1">L{session?.roleLevel ?? "-"}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+              <LegacyPicker
+                title="職員"
+                items={staffItems}
+                total={staffTotal}
+                page={staffPage}
+                pageSize={12}
+                query={staffQuery}
+                loading={pickerLoading}
+                selectedKey={session?.staffId}
+                getKey={(member) => member.id}
+                columns={[
+                  { header: "號碼", render: (member) => member.legacyId ?? member.id },
+                  { header: "姓名", render: (member) => member.displayName },
+                  { header: "級別", numeric: true, render: (member) => `L${member.roleLevel}` },
+                ]}
+                onQueryChange={(query) => void runStaffSearch(query, 1)}
+                onPageChange={(page) => void runStaffSearch(staffQuery, page)}
+                onSelect={(member) => setStatusMessage(`職員：${member.displayName} · L${member.roleLevel}`)}
+              />
             ) : null}
 
             {activePanel === "promo" ? (
@@ -875,6 +1301,17 @@ export function PosClassicClient({
                       ? `${selectedCustomer.nameZh || selectedCustomer.nameEn}（結餘 ${selectedCustomer.pointsBalance} 分）`
                       : "未選擇"}
                   </div>
+                  {promoResult.applied.length > 0 ? (
+                    <div className="mt-2 border-t border-[#d4d0c8] pt-1">
+                      <div className="font-bold">已套用推廣優惠：</div>
+                      {promoResult.applied.map((a) => (
+                        <div key={a.ruleId} className="flex justify-between text-[#0a7a2f]">
+                          <span>{a.name} ({a.code})</span>
+                          <span>-{formatHkd(a.discountHkd)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   {cart.length === 0 ? <div className="text-[#808080]">（空單暫無優惠）</div> : null}
                 </div>
               </div>
@@ -904,8 +1341,8 @@ export function PosClassicClient({
               <div className="p-2 text-[12px] text-black">
                 <div className="border-b border-[#aca899] bg-[#e8eef5] px-2 py-1 text-center font-bold">資訊</div>
                 <div className="mt-2 space-y-1">
-                  <div>分店：Central({session?.shopId ?? 1})</div>
-                  <div>終端機：2</div>
+                  <div>分店：{storeContext?.shopNameEn ?? "Central"}({storeContext?.legacySn ?? 1})</div>
+                  <div>終端機：{storeContext?.legacyMn ?? 1}</div>
                   <div>收銀員：{session?.displayName ?? "未登入"}</div>
                   <div>版本：POS v2（重製 POSGV3.3 build 678）</div>
                   <div>資料庫：MySQL 8（本機）</div>
@@ -918,33 +1355,20 @@ export function PosClassicClient({
                 <div className="border-b border-[#aca899] bg-[#e8eef5] px-2 py-1 text-center text-[12px] font-bold text-black">
                   其他交易
                 </div>
-                {(["到貨", "轉出", "報銷", "調整"] as const).map((label) => (
-                  <button key={label} type="button" className={panelBtn} onClick={() => showMsg("030", `${label} — 請到後台存貨頁處理。`)}>
+                {([
+                  ["GOODS_RECEIPT", "到貨"],
+                  ["PURCHASE_RETURN", "退貨確認"],
+                  ["SALES_RETURN", "退貨"],
+                  ["STOCK_TRANSFER_OUT", "轉出"],
+                  ["STOCK_TRANSFER_IN", "轉入"],
+                  ["WRITE_OFF", "報銷"],
+                  ["STOCK_ADJUSTMENT", "調整"],
+                  ["PETTY_PAYOUT", "Payout"],
+                ] as Array<[OfficeDocType, string]>).map(([type, label]) => (
+                  <button key={type} type="button" className={panelBtn} onClick={() => setOfficeTxnType(type)}>
                     {label}
                   </button>
                 ))}
-                <button
-                  type="button"
-                  className={panelBtn}
-                  onClick={() => {
-                    setDocType("SALES_RETURN");
-                    setActivePanel("quickpick");
-                    setStatusMessage("已切換到退售模式");
-                  }}
-                >
-                  退貨
-                </button>
-                <button
-                  type="button"
-                  className={panelBtn}
-                  onClick={() => {
-                    setDocType("PETTY_PAYOUT");
-                    setActivePanel("quickpick");
-                    setStatusMessage("已切換到 Payout 模式");
-                  }}
-                >
-                  Payout
-                </button>
               </div>
             ) : null}
 
@@ -953,13 +1377,28 @@ export function PosClassicClient({
                 <div className="border-b border-[#aca899] bg-[#e8eef5] px-2 py-1 text-center text-[12px] font-bold text-black">
                   收銀員
                 </div>
-                <button type="button" className={panelBtn} onClick={() => router.push("/invoices")}>
+                <button type="button" className={panelBtn} onClick={() => void openCashDrawerNoSale()}>
+                  開柜 (No Sale)
+                </button>
+                <button type="button" className={panelBtn} onClick={() => setShowFloatModal(true)}>
+                  銀頭 (Opening Float)
+                </button>
+                <button type="button" className={panelBtn} onClick={() => router.push("/backoffice/day-end")}>
+                  轉更 / 日結
+                </button>
+                <button type="button" className={panelBtn} onClick={() => void settleOctopusXfile()}>
+                  八達通結算 (XFile)
+                </button>
+                <button type="button" className={panelBtn} onClick={() => void flushOfflineOutbox()}>
+                  離線單據重送 ({outboxCount})
+                </button>
+                <button type="button" className={panelBtn} onClick={() => setShowPrinter(true)}>
                   印表機設定
                 </button>
-                <button type="button" className={panelBtn} onClick={() => router.push("/backoffice/settings")}>
+                <button type="button" className={panelBtn} onClick={() => setShowPassword(true)}>
                   更改密碼
                 </button>
-                <button type="button" className={panelBtn} onClick={() => showMsg("031", "維修模式 — 請聯絡系統行政。")}>
+                <button type="button" className={panelBtn} title="維修入口僅供系統行政使用" onClick={() => showMsg("031", "維修模式 — 請聯絡系統行政。")}>
                   維修
                 </button>
               </div>
@@ -970,13 +1409,13 @@ export function PosClassicClient({
                 <div className="border-b border-[#aca899] bg-[#e8eef5] px-2 py-1 text-center text-[12px] font-bold text-black">
                   經理
                 </div>
-                <button type="button" className={panelBtn} onClick={() => router.push("/backoffice/reports")}>
+                <button type="button" className={panelBtn} onClick={() => setActiveReport("hourly")}>
                   時報
                 </button>
-                <button type="button" className={panelBtn} onClick={() => router.push("/backoffice/reports")}>
+                <button type="button" className={panelBtn} onClick={() => setActiveReport("items")}>
                   項報
                 </button>
-                <button type="button" className={panelBtn} onClick={() => router.push("/backoffice/reports")}>
+                <button type="button" className={panelBtn} onClick={() => setActiveReport("history")}>
                   歷史數據
                 </button>
               </div>
@@ -987,14 +1426,20 @@ export function PosClassicClient({
                 <div className="border-b border-[#aca899] bg-[#e8eef5] px-2 py-1 text-center text-[12px] font-bold text-black">
                   支援
                 </div>
-                <button type="button" className={panelBtn} onClick={() => showMsg("032", "eRun Support Hotline：51 888 902")}>
+                <button type="button" className={panelBtn} onClick={() => setSupportKind("support")}>
                   營運通支援
                 </button>
-                <button type="button" className={panelBtn} onClick={() => showMsg("033", "互聯網連線正常。")}>
+                <button type="button" className={panelBtn} onClick={() => setSupportKind("internet")}>
                   互聯網
                 </button>
-                <button type="button" className={panelBtn} onClick={() => showMsg("034", "IP：127.0.0.1（本機部署）")}>
+                <button type="button" className={panelBtn} onClick={() => setSupportKind("ip")}>
                   IP
+                </button>
+                <button type="button" className={panelBtn} onClick={() => setSupportKind("helper")}>
+                  小幫手
+                </button>
+                <button type="button" className={panelBtn} onClick={() => setSupportKind("manual")}>
+                  用戶手冊
                 </button>
                 <button type="button" className={panelBtn} onClick={() => setShowAbout(true)}>
                   關於軟件
@@ -1203,22 +1648,47 @@ export function PosClassicClient({
 
       {/* ── 4. tender panel (方法) ─────────────────────────────────────── */}
       {tenderMode ? (
-        <div className="flex items-stretch gap-1 border-t border-[#aca899] bg-[#f0f0f0] p-1">
-          {TENDERS.map((t) => (
+        <div className="border-t border-[#aca899] bg-[#f0f0f0] p-1">
+          <div className="flex flex-wrap items-center gap-2 pb-1 text-[11px] text-black">
+            <span>尚欠餘額：<strong className="font-mono text-[#c00000]">{formatHkd(remainingDue)}</strong></span>
+            {appliedSplits.map((sp) => (
+              <span key={sp.id} className="inline-flex items-center gap-1 border border-[#7f9db9] bg-white px-1.5 py-0.5 font-mono">
+                {sp.tenderCode} {formatHkd(sp.amountHkd)}
+                <button
+                  type="button"
+                  onClick={() => setAppliedSplits((prev) => prev.filter((x) => x.id !== sp.id))}
+                  className="text-[#c00000]"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
             <button
-              key={t.key}
               type="button"
-              onClick={() => setSelectedTender(t.key)}
-              className={`flex w-28 flex-col items-center border px-1 py-1.5 text-[12px] ${
-                selectedTender === t.key
-                  ? "border-[#316ac5] bg-[#316ac5] text-white"
-                  : "border-[#aca899] bg-white text-black hover:bg-[#e5e1d5]"
-              }`}
+              onClick={addSplitPayment}
+              disabled={remainingDue <= 0 || cart.length === 0}
+              className="ml-auto border border-[#7f9db9] bg-[#fff8dc] px-2 py-0.5 text-[11px] text-black hover:bg-[#ffefb5] disabled:opacity-40"
             >
-              <span className="font-bold">{t.zh}</span>
-              {t.sub ? <span className="text-[10px] opacity-70">{t.sub}</span> : null}
+              加入部分付款 (Split)
             </button>
-          ))}
+          </div>
+          <div className="flex items-stretch gap-1">
+            {TENDERS.map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setSelectedTender(t.key)}
+                className={`flex w-28 flex-col items-center border px-1 py-1.5 text-[12px] ${
+                  selectedTender === t.key
+                    ? "border-[#316ac5] bg-[#316ac5] text-white"
+                    : "border-[#aca899] bg-white text-black hover:bg-[#e5e1d5]"
+                }`}
+              >
+                <span className="font-bold">{t.zh}</span>
+                {t.sub ? <span className="text-[10px] opacity-70">{t.sub}</span> : null}
+              </button>
+            ))}
+          </div>
         </div>
       ) : null}
 
@@ -1254,6 +1724,16 @@ export function PosClassicClient({
         >
           <span className="text-[20px]">💳</span>方法
         </button>
+        <button
+          type="button"
+          className={fnBtn}
+          disabled={cart.length === 0 || submitting}
+          style={cart.length === 0 || submitting ? { opacity: 0.35, cursor: "not-allowed" } : undefined}
+          onClick={() => void submitBill("held")}
+          title="暫停單"
+        >
+          <span className="text-[20px]">⏸️</span>暫停
+        </button>
         <button type="button" className={fnBtn} onClick={reselect} title="重選">
           <span className="text-[20px]">🚫</span>重選
         </button>
@@ -1262,7 +1742,7 @@ export function PosClassicClient({
           className={`${fnBtn} border-r-0`}
           disabled={cart.length === 0 || submitting}
           style={cart.length === 0 || submitting ? { opacity: 0.35, cursor: "not-allowed" } : undefined}
-          onClick={() => void submitBill()}
+          onClick={() => void submitBill("completed")}
           title="完成"
         >
           <span className="text-[20px]">✅</span>
@@ -1280,7 +1760,12 @@ export function PosClassicClient({
       {/* ── 6. VB6 message dialog ──────────────────────────────────────── */}
       {msg ? (
         <div className="absolute inset-0 z-10 flex items-start justify-center bg-black/10 pt-24">
-          <div className="w-[480px] border border-[#808080] bg-[#f0f0f0] shadow-[4px_4px_8px_rgba(0,0,0,0.4)]">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`營運通訊息 - ${msg.code}`}
+            className="w-[480px] border border-[#808080] bg-[#f0f0f0] shadow-[4px_4px_8px_rgba(0,0,0,0.4)]"
+          >
             <div className="border-b border-[#d4d0c8] px-2 py-0.5 text-[12px] font-bold text-black">營運通訊息</div>
             <div className="flex items-start gap-3 p-3">
               <span className="text-[28px]">💬</span>
@@ -1289,7 +1774,16 @@ export function PosClassicClient({
                 <div className="mt-1 whitespace-pre-line text-[13px] font-bold text-[#c00000]">{msg.text}</div>
               </div>
             </div>
-            <div className="flex justify-end p-2">
+            <div className="flex justify-end gap-2 p-2">
+              {completedInvoiceNo ? (
+                <button
+                  type="button"
+                  onClick={() => router.push(`/invoices/${encodeURIComponent(completedInvoiceNo)}/print`)}
+                  className="border border-[#aca899] bg-white px-4 py-1.5 text-[13px] text-black hover:bg-[#e5e1d5]"
+                >
+                  收據預覽
+                </button>
+              ) : null}
               <button
                 type="button"
                 autoFocus
@@ -1305,77 +1799,35 @@ export function PosClassicClient({
 
       {/* ── 7. 查單 dialog ─────────────────────────────────────────────── */}
       {showBillQuery ? (
-        <div className="absolute inset-0 z-10 flex items-start justify-center bg-black/10 pt-10">
-          <div className="flex h-[70%] w-[80%] flex-col border border-[#808080] bg-[#f0f0f0] shadow-[4px_4px_8px_rgba(0,0,0,0.4)]">
-            <div className="border-b border-[#d4d0c8] px-2 py-0.5 text-[12px] font-bold text-black">查單</div>
-            <div className="flex border-b border-[#aca899] text-[12px]">
-              {["今日銷售", "暫停單", "其他交易", "未處理單"].map((tab, i) => (
-                <span
-                  key={tab}
-                  className={`border-r border-[#aca899] px-3 py-1 ${i === 0 ? "bg-white font-bold" : "bg-[#f0f0f0]"} text-black`}
-                >
-                  {tab}
-                </span>
-              ))}
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto bg-white">
-              <table className="w-full border-collapse text-[12px]">
-                <thead className="sticky top-0">
-                  <tr className="bg-[#e8eef5] text-left text-black">
-                    <th className="px-2 py-1 font-normal">單號</th>
-                    <th className="px-2 py-1 font-normal">類型</th>
-                    <th className="px-2 py-1 font-normal">狀態</th>
-                    <th className="px-2 py-1 text-right font-normal">金額</th>
-                    <th className="px-2 py-1 text-right font-normal">餘額</th>
-                    <th className="px-2 py-1" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentDocs.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="px-2 py-6 text-center text-[#808080]">
-                        （本機暫無已完成單據 — 完整列表請到「發票與 AR」頁）
-                      </td>
-                    </tr>
-                  ) : (
-                    recentDocs.map((doc) => (
-                      <tr key={doc.invoiceNo} className="border-b border-[#e0e0e0] text-black">
-                        <td className="px-2 py-1 font-mono">{doc.invoiceNo}</td>
-                        <td className="px-2 py-1">{doc.docType}</td>
-                        <td className="px-2 py-1">{doc.paymentStatus.toUpperCase()}</td>
-                        <td className="px-2 py-1 text-right font-mono">{formatHkd(doc.netAmountHkd)}</td>
-                        <td className="px-2 py-1 text-right font-mono">{formatHkd(doc.balanceDueHkd)}</td>
-                        <td className="px-2 py-1 text-right">
-                          <button
-                            type="button"
-                            className="border border-[#aca899] bg-[#f0f0f0] px-2 py-0.5 hover:bg-[#e5e1d5]"
-                            onClick={() => router.push(`/invoices/${encodeURIComponent(doc.invoiceNo)}/print`)}
-                          >
-                            列印
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <div className="flex justify-end gap-2 border-t border-[#aca899] p-2">
-              <button
-                type="button"
-                className="border border-[#aca899] bg-[#f0f0f0] px-4 py-1 text-[12px] text-black hover:bg-[#e5e1d5]"
-                onClick={() => router.push("/invoices")}
-              >
-                發票與 AR 頁
-              </button>
-              <button
-                type="button"
-                autoFocus
-                className="border border-[#aca899] bg-[#e1dfff] px-6 py-1 text-[12px] text-black hover:bg-[#d0ccff]"
-                onClick={() => setShowBillQuery(false)}
-              >
-                離開
-              </button>
+        <BillQueryDialog onClose={() => setShowBillQuery(false)} onLoad={loadQueriedBill} />
+      ) : null}
+
+      {officeTxnType ? <OfficeTxnPanel initialType={officeTxnType} products={products} onSearch={runProductSearch} onClose={() => setOfficeTxnType(null)} /> : null}
+      {activeReport === "hourly" ? <HourlyReport onClose={() => setActiveReport(null)} /> : null}
+      {activeReport === "items" ? <ItemReport onClose={() => setActiveReport(null)} /> : null}
+      {activeReport === "history" ? <HistoryReport onClose={() => setActiveReport(null)} /> : null}
+      {supportKind ? <SupportDialog kind={supportKind} shopId={storeContext?.legacySn ?? 1} terminalId={storeContext?.legacyMn ?? 1} onClose={() => setSupportKind(null)} /> : null}
+      {showStock ? <StockPanel onClose={() => setShowStock(false)} /> : null}
+      {showPassword ? <ChangePasswordDialog onClose={() => setShowPassword(false)} /> : null}
+      {showPrinter ? <PrinterSetupDialog onClose={() => setShowPrinter(false)} /> : null}
+      {showFloatModal ? (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/20" role="dialog" aria-modal="true" aria-label="銀頭設定">
+          <div className="w-[360px] border border-[#808080] bg-[#f0f0f0] p-4 shadow-xl text-[12px] text-black">
+            <div className="font-bold">設定今日銀頭 (Opening Float)</div>
+            <label className="mt-3 block">
+              金額 (HKD)
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={floatInput}
+                onChange={(e) => setFloatInput(e.target.value)}
+                className="mt-1 w-full border border-[#7f9db9] bg-white px-2 py-1 font-mono"
+              />
+            </label>
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => void saveOpeningFloat()} className="border border-[#7f9db9] bg-[#f0f0f0] px-5 py-1">儲存</button>
+              <button type="button" onClick={() => setShowFloatModal(false)} className="border border-[#7f9db9] bg-[#e1dfff] px-5 py-1">離開</button>
             </div>
           </div>
         </div>

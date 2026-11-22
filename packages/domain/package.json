@@ -9,7 +9,8 @@
     "./rounding": "./src/rounding.ts",
     "./bill-math": "./src/bill-math.ts",
     "./crm-rules": "./src/crm-rules.ts",
-    "./octopus-rules": "./src/octopus-rules.ts"
+    "./octopus-rules": "./src/octopus-rules.ts",
+    "./promotion-engine": "./src/promotion-engine.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

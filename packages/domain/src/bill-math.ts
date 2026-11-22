@@ -32,7 +32,7 @@ export interface BillTotals {
 }
 
 /**
- * Empirically verified across 28,285 XC=99 V47 bills (99.93% exact cent parity):
+ * Empirically verified across 28,299 XC=99 V47 bills (99.93% exact cent parity):
  * Active bill totals sum non-cancelled, non-modifier, dk > 0 lines (excluding dk <= -1000 CRM bonus rows).
  */
 export function calculateBillTotals(lines: readonly DomainBillLine[]): BillTotals {

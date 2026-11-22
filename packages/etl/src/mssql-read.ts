@@ -32,10 +32,12 @@ export async function querySqlcmdRows(
   args.push("-E", "-C", "-f", "65001", "-h", "-1", "-W", "-s", "|", "-Q", `SET NOCOUNT ON; ${tsql}`);
 
   const { stdout } = await execFileAsync("sqlcmd", args, {
+    encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     timeout: timeoutMs,
   });
   return stdout
+    .replace(/^\uFEFF/, "")
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
     .filter((line) => line.length > 0)
@@ -44,7 +46,7 @@ export async function querySqlcmdRows(
 
 /**
  * Runs a strictly read-only T-SQL query returning FOR JSON PATH, INCLUDE_NULL_VALUES
- * with unlimited output width (-y 0) and UTF-8 (-f 65001) so JSON rows are never truncated.
+ * with unlimited output width (-y 0) and UTF-8 (-f 65001) so JSON rows are never truncated or corrupted.
  */
 export async function querySqlcmdJson<T>(
   server: string,
@@ -57,13 +59,13 @@ export async function querySqlcmdJson<T>(
 
   const { stdout } = await execFileAsync(
     "sqlcmd",
-    ["-S", server, "-d", database, "-E", "-C", "-f", "65001", "-h", "-1", "-y", "0", "-Q", fullSql],
-    { maxBuffer: 128 * 1024 * 1024, timeout: timeoutMs },
+    ["-S", server, "-d", database, "-E", "-C", "-f", "65001", "-y", "0", "-Q", fullSql],
+    { encoding: "utf8", maxBuffer: 128 * 1024 * 1024, timeout: timeoutMs },
   );
 
   // IMPORTANT: sqlcmd splits FOR JSON output into ~2033-char lines. Never trimEnd() individual lines,
   // or a boundary landing on a space (e.g. inside "2017-03-04 15:47:38") would corrupt JSON strings.
-  const jsonPayload = stdout.replace(/\r?\n/g, "").trim();
+  const jsonPayload = stdout.replace(/^\uFEFF/, "").replace(/\r?\n/g, "").trim();
 
   if (!jsonPayload) return [];
   return JSON.parse(jsonPayload) as T[];

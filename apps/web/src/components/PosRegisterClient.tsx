@@ -12,11 +12,14 @@ import { validateOctopusAmountHkd } from "@hkharp/domain/octopus-rules";
 export interface PosProduct {
   id?: number;
   sku: string;
+  ubc?: string;
   nameZh: string;
   nameEn: string;
   categoryLabel?: string;
   categoryC1: number;
   unitPriceHkd: number;
+  allowItemDiscount?: boolean;
+  isFixedPrice?: boolean;
   excludeFromCrmBonus?: boolean;
 }
 
@@ -31,6 +34,9 @@ export interface PosMenuGroup {
 export interface PosCustomer {
   id: number;
   legacyId: string;
+  gradeId?: number | null;
+  gradeName?: string;
+  cardNo?: string;
   nameZh: string;
   nameEn: string;
   phone: string;
@@ -290,7 +296,6 @@ export function PosRegisterClient({
     const payload = {
       clientIdempotencyKey: `bill-${crypto.randomUUID()}`,
       shopId: session.shopId || 1,
-      terminalId: 2,
       docType: effectiveDocType,
       customerId: selectedCustomer?.id,
       customerCurrentPoints: selectedCustomer?.pointsBalance ?? 0,

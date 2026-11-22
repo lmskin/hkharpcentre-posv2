@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { listCategoriesAndUnits, searchProducts, upsertProductRecord } from "@hkharp/db";
+import { countProducts, findExactProductByCode, listCategoriesAndUnits, searchProducts, upsertProductRecord } from "@hkharp/db";
 import { requireAuthenticatedSession } from "@/lib/session";
 
 const UpsertProductSchema = z.object({
@@ -14,17 +14,32 @@ const UpsertProductSchema = z.object({
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
+  const exactCode = url.searchParams.get("exactCode");
+  if (exactCode !== null) {
+    const item = await findExactProductByCode(exactCode);
+    return NextResponse.json({ item });
+  }
   const q = url.searchParams.get("q") ?? undefined;
   const c1Raw = url.searchParams.get("categoryC1");
   const categoryC1 = c1Raw !== null && c1Raw !== "" ? Number(c1Raw) : undefined;
-  const limit = Number(url.searchParams.get("limit") ?? "60");
+  const page = Math.max(1, Number(url.searchParams.get("page") ?? "1") || 1);
+  const pageSize = Math.min(200, Math.max(1, Number(url.searchParams.get("pageSize") ?? url.searchParams.get("limit") ?? "60") || 60));
 
-  const [items, lookups] = await Promise.all([
-    searchProducts({ q, categoryC1, limit }),
+  const [items, total, lookups] = await Promise.all([
+    searchProducts({ q, categoryC1, limit: pageSize, offset: (page - 1) * pageSize }),
+    countProducts({ q, categoryC1 }),
     listCategoriesAndUnits(),
   ]);
 
-  return NextResponse.json({ items, categories: lookups.categories, units: lookups.units });
+  return NextResponse.json({
+    items,
+    total,
+    page,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(total / pageSize)),
+    categories: lookups.categories,
+    units: lookups.units,
+  });
 }
 
 export async function POST(request: Request) {

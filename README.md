@@ -36,7 +36,7 @@ npm install
 # 2. Run TypeScript checks across all workspaces
 npm run typecheck
 
-# 3. Run unit tests + V47 SQL Server Golden-Master Replay (28,285 XC=99 bills)
+# 3. Run unit tests + V47 SQL Server Golden-Master Replay (28,299 XC=99 bills)
 npm test
 npm run test:golden
 

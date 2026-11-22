@@ -15,7 +15,7 @@ import { allocateNextDocumentNumber } from "./sequence";
 import { auditLogs } from "./schema/org-auth";
 import { products } from "./schema/catalog";
 import { crmPointLedger, customers } from "./schema/crm";
-import { billLines, bills, pettyCashVouchers } from "./schema/sales-ar";
+import { billLines, bills, deliveryOrders, pettyCashVouchers } from "./schema/sales-ar";
 import { billPayments, octopusTransactions, payMethods } from "./schema/payments";
 import {
   dailyHourlySales,
@@ -26,6 +26,27 @@ import {
   stockTakeLines,
   stockTakes,
 } from "./schema/stock-ops";
+
+const OFFICE_ONLY_DOC_TYPES: BillDocType[] = [
+  "GOODS_RECEIPT",
+  "PURCHASE_RETURN",
+  "STOCK_TRANSFER_OUT",
+  "STOCK_TRANSFER_IN",
+  "WRITE_OFF",
+  "STOCK_ADJUSTMENT",
+  "STOCKTAKE",
+];
+const NO_STOCK_DOC_TYPES: BillDocType[] = ["PETTY_PAYOUT", "CRM_POINT_TXN"];
+
+export function calculateVoidStockDelta(docType: string, quantity: number, originalDelta?: number): number {
+  if (docType === "STOCK_ADJUSTMENT" || docType === "STOCKTAKE") {
+    if (originalDelta === undefined) throw new Error("Original stock adjustment movement is required for void");
+    return -originalDelta;
+  }
+  const reverseSign =
+    docType === "SALES_RETURN" || docType === "GOODS_RECEIPT" || docType === "STOCK_TRANSFER_IN" ? -1 : 1;
+  return reverseSign * quantity;
+}
 
 export function formatHktBusinessDate(date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -44,6 +65,22 @@ function prefixForDocType(docType: BillDocType): { prefix: string; xc: number; x
       return { prefix: "RTN", xc: 9, xt: 1, sd: 1 };
     case "PETTY_PAYOUT":
       return { prefix: "PAY", xc: 12, xt: 5, sd: 1 };
+    case "GOODS_RECEIPT":
+      return { prefix: "GRC", xc: 1, xt: 5, sd: 1 };
+    case "PURCHASE_RETURN":
+      return { prefix: "PRC", xc: 4, xt: 2, sd: -1 };
+    case "STOCK_TRANSFER_OUT":
+      return { prefix: "TRF", xc: 13, xt: 5, sd: -1 };
+    case "STOCK_TRANSFER_IN":
+      return { prefix: "TRI", xc: 14, xt: 5, sd: 1 };
+    case "WRITE_OFF":
+      return { prefix: "WOF", xc: 10, xt: 5, sd: -1 };
+    case "STOCK_ADJUSTMENT":
+      return { prefix: "ADJ", xc: 15, xt: 5, sd: 1 };
+    case "STOCKTAKE":
+      return { prefix: "STK", xc: 93, xt: 11, sd: 0 };
+    case "CRM_POINT_TXN":
+      return { prefix: "CRM", xc: 54, xt: 17, sd: 0 };
     default:
       return { prefix: "POS", xc: 99, xt: 1, sd: -1 };
   }
@@ -55,6 +92,11 @@ export interface CreateBillOrInvoiceTxInput {
   terminalId: number;
   staffId: number;
   docType: BillDocType;
+  status?: "completed" | "held";
+  supersedeInvoiceNo?: string;
+  createDeliveryOrder?: boolean;
+  businessDateOverride?: string;
+  sourceTable?: "POS_V2" | "OfficeXHeader";
   customerId?: number;
   lines: Array<{
     sku: string;
@@ -62,6 +104,7 @@ export interface CreateBillOrInvoiceTxInput {
     nameEn?: string;
     categoryC1: number;
     quantity: number;
+    stockQuantity?: number;
     unitPriceHkd: number;
     discountRate?: number;
     lineDiscountAmountHkd?: number;
@@ -95,7 +138,10 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
   }
 
   const now = new Date();
-  const businessDate = formatHktBusinessDate(now);
+  const businessDate =
+    input.businessDateOverride && /^\d{4}-\d{2}-\d{2}$/.test(input.businessDateOverride)
+      ? input.businessDateOverride
+      : formatHktBusinessDate(now);
   const { prefix, xc, xt, sd } = prefixForDocType(input.docType);
   const invoiceNo = await allocateNextDocumentNumber(db, {
     shopId: input.shopId,
@@ -105,6 +151,33 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
   });
 
   return db.transaction(async (tx) => {
+    const closedBatch = await tx
+      .select({ id: dayEndBatches.id })
+      .from(dayEndBatches)
+      .where(
+        and(
+          eq(dayEndBatches.shopId, input.shopId),
+          eq(dayEndBatches.businessDate, businessDate),
+          eq(dayEndBatches.closed, true),
+        ),
+      )
+      .limit(1);
+    if (closedBatch.length > 0) {
+      throw new Error(`Business date ${businessDate} is sealed by day-end`);
+    }
+
+    if (input.supersedeInvoiceNo) {
+      const oldRows = await tx
+        .select()
+        .from(bills)
+        .where(eq(bills.invoiceNo, input.supersedeInvoiceNo))
+        .for("update");
+      if (oldRows.length === 0) {
+        throw new Error(`Original bill ${input.supersedeInvoiceNo} not found for amendment`);
+      }
+      await voidLockedBillInsideTx(tx, oldRows[0]!, input.staffId, `Superseded by ${invoiceNo}`);
+    }
+
     const totals = calculateBillTotals(
       input.lines.map((l, idx) => ({
         sku: l.sku,
@@ -116,6 +189,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
       })),
     );
 
+    const isHeld = input.status === "held";
     let customerPoints = 0;
     if (input.customerId) {
       const custRows = await tx
@@ -140,7 +214,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
       customerPoints,
     );
 
-    if (input.customerId && !crm.redemptionAllowed) {
+    if (!isHeld && input.customerId && !crm.redemptionAllowed) {
       throw new Error(crm.redemptionError ?? "Insufficient CRM points");
     }
 
@@ -149,14 +223,23 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
       docType: input.docType,
       netAmountHkd: totals.netAmountHkd,
       issuedAtIso: now.toISOString(),
-      initialPayments: input.initialPayments.map((p) => ({
-        tenderCode: p.tenderCode,
-        amountHkd: p.amountHkd,
-        paidAtIso: p.paidAtIso ?? now.toISOString(),
-        referenceNo: p.referenceNo,
-      })),
+      initialPayments: isHeld
+        ? []
+        : input.initialPayments.map((p) => ({
+            tenderCode: p.tenderCode,
+            amountHkd: p.amountHkd,
+            paidAtIso: p.paidAtIso ?? now.toISOString(),
+            referenceNo: p.referenceNo,
+          })),
     });
 
+    if (!isHeld && OFFICE_ONLY_DOC_TYPES.includes(input.docType)) {
+      invoiceState.paymentStatus = "paid";
+      invoiceState.balanceDueHkd = 0;
+      invoiceState.paidAtIso = now.toISOString();
+    }
+
+    const billStatus = isHeld ? ("held" as const) : ("completed" as const);
     const billInsert = await tx.insert(bills).values({
       clientIdempotencyKey: input.clientIdempotencyKey,
       shopId: input.shopId,
@@ -165,11 +248,11 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
       customerId: input.customerId ?? null,
       invoiceNo,
       docType: input.docType,
-      sourceTable: "POS_V2",
+      sourceTable: input.sourceTable ?? (OFFICE_ONLY_DOC_TYPES.includes(input.docType) || input.docType === "PETTY_PAYOUT" ? "OfficeXHeader" : "POS_V2"),
       legacyXc: xc,
       legacyXt: xt,
       legacySd: sd,
-      status: "completed",
+      status: billStatus,
       paymentStatus: invoiceState.paymentStatus,
       businessDate,
       grossAmount: totals.grossAmountHkd.toFixed(4),
@@ -178,7 +261,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
       paidAmount: invoiceState.paidAmountHkd.toFixed(4),
       balanceDue: invoiceState.balanceDueHkd.toFixed(4),
       issuedAt: now,
-      paidAt: invoiceState.paymentStatus === "paid" ? now : null,
+      paidAt: !isHeld && invoiceState.paymentStatus === "paid" ? now : null,
       notes: input.notes ?? null,
     });
     const billId = Number(billInsert[0].insertId);
@@ -189,7 +272,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
       const prodRows = await tx
         .select({ id: products.id, barcode: products.barcode, avgCost: products.avgCost })
         .from(products)
-        .where(and(eq(products.shopId, 1), inArray(products.barcode, skus)))
+        .where(and(eq(products.shopId, input.shopId), inArray(products.barcode, skus)))
         .catch(async () => [] as Array<{ id: number; barcode: string; avgCost: string }>);
 
       const fallbackRows =
@@ -218,7 +301,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
           nameEn: (l.nameEn ?? "").slice(0, 200),
           categoryC1: l.categoryC1,
           legacyDk: idx + 1,
-          quantity: l.quantity.toFixed(4),
+          quantity: (input.docType === "STOCK_ADJUSTMENT" ? (l.stockQuantity ?? l.quantity) : l.quantity).toFixed(4),
           unitPrice: l.unitPriceHkd.toFixed(4),
           discountRate: (l.discountRate ?? 0).toFixed(6),
           lineDiscountAmount: (l.lineDiscountAmountHkd ?? 0).toFixed(4),
@@ -228,6 +311,40 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
         };
       }),
     );
+
+    if (isHeld) {
+      await tx.insert(auditLogs).values({
+        shopId: input.shopId,
+        staffId: input.staffId,
+        action: "HOLD_BILL",
+        entityType: "bills",
+        entityId: invoiceNo,
+        details: {
+          netAmountHkd: totals.netAmountHkd,
+          supersededInvoiceNo: input.supersedeInvoiceNo ?? null,
+        },
+      });
+      return {
+        idempotentReplay: false,
+        billId,
+        invoiceNo,
+        docType: input.docType,
+        status: "held" as const,
+        paymentStatus: invoiceState.paymentStatus,
+        netAmountHkd: totals.netAmountHkd,
+        paidAmountHkd: 0,
+        balanceDueHkd: totals.netAmountHkd,
+        issuedAtIso: now.toISOString(),
+      };
+    }
+
+    if (input.createDeliveryOrder) {
+      await tx.insert(deliveryOrders).values({
+        billId,
+        deliveryStatus: "pending",
+        remarks: input.notes ? input.notes.slice(0, 255) : null,
+      });
+    }
 
     if (input.initialPayments.length > 0) {
       const pmRows = await tx.select().from(payMethods);
@@ -242,6 +359,9 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
         }
 
         const paidDateObj = rawPmt.paidAtIso ? new Date(rawPmt.paidAtIso) : now;
+        const pmtBusinessDate = rawPmt.paidAtIso
+          ? formatHktBusinessDate(paidDateObj)
+          : businessDate;
         const pmtRes = await tx.insert(billPayments).values({
           billId,
           payMethodId,
@@ -251,7 +371,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
           amount: applied.amountHkd.toFixed(4),
           tipsAmount: "0.0000",
           paidAt: paidDateObj,
-          businessDate: formatHktBusinessDate(paidDateObj),
+          businessDate: pmtBusinessDate,
           approvalCode: rawPmt.approvalCode ?? null,
           cardLast4: rawPmt.cardLast4 ?? null,
           maskedPan: rawPmt.cardLast4 ? `************${rawPmt.cardLast4}` : null,
@@ -304,36 +424,53 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
         .where(eq(customers.id, input.customerId));
     }
 
-    // Update inventory balances on sales / invoices / returns (not petty payout)
-    if (input.docType !== "PETTY_PAYOUT") {
-      const sign = input.docType === "SALES_RETURN" ? 1 : -1;
-      const moveType = input.docType === "SALES_RETURN" ? "RETURN" : "SALE";
+    if (!NO_STOCK_DOC_TYPES.includes(input.docType)) {
       for (const l of input.lines) {
         const prod = prodMap.get(l.sku);
         if (!prod) continue;
-        const delta = (sign * l.quantity).toFixed(4);
+        let sign = -1;
+        let moveType = "SALE";
+        if (input.docType === "SALES_RETURN") { sign = 1; moveType = "RETURN"; }
+        else if (input.docType === "GOODS_RECEIPT") { sign = 1; moveType = "PURCHASE_IN"; }
+        else if (input.docType === "PURCHASE_RETURN") { sign = -1; moveType = "PURCHASE_RETURN"; }
+        else if (input.docType === "STOCK_TRANSFER_OUT") { sign = -1; moveType = "TRANSFER_OUT"; }
+        else if (input.docType === "STOCK_TRANSFER_IN") { sign = 1; moveType = "TRANSFER_IN"; }
+        else if (input.docType === "WRITE_OFF") { sign = -1; moveType = "WRITE_OFF"; }
+        else if (input.docType === "STOCK_ADJUSTMENT") { sign = 1; moveType = "ADJUST"; }
+        else if (input.docType === "STOCKTAKE") { sign = 1; moveType = "STOCKTAKE"; }
+
+        const stockQuantity = l.stockQuantity ?? l.quantity;
+        const delta = sign * stockQuantity;
         const balRows = await tx
           .select()
           .from(stockBalances)
           .where(and(eq(stockBalances.shopId, input.shopId), eq(stockBalances.productId, prod.id)))
           .for("update");
 
-        const currentCost = balRows[0]?.movingAvgCost ?? prod.avgCost ?? "0.0000";
+        const currentQty = Number(balRows[0]?.onHandQty ?? 0);
+        const currentCost = Number(balRows[0]?.movingAvgCost ?? prod.avgCost ?? 0);
+        const nextQty = currentQty + delta;
+        let nextCost = currentCost;
+        if (input.docType === "GOODS_RECEIPT" && nextQty > 0) {
+          nextCost = roundToCents((Math.max(0, currentQty) * currentCost + stockQuantity * l.unitPriceHkd) / nextQty);
+        }
+        const deltaText = delta.toFixed(4);
+        const nextCostText = nextCost.toFixed(4);
         if (balRows.length === 0) {
           await tx.insert(stockBalances).values({
             shopId: input.shopId,
             productId: prod.id,
-            onHandQty: delta,
-            movingAvgCost: currentCost,
+            onHandQty: nextQty.toFixed(4),
+            movingAvgCost: nextCostText,
           });
         } else {
           await tx
             .update(stockBalances)
-            .set({
-              onHandQty: sql`${stockBalances.onHandQty} + ${delta}`,
-              updatedAt: now,
-            })
+            .set({ onHandQty: nextQty.toFixed(4), movingAvgCost: nextCostText, updatedAt: now })
             .where(eq(stockBalances.id, balRows[0]!.id));
+        }
+        if (input.docType === "GOODS_RECEIPT") {
+          await tx.update(products).set({ lastPurchaseCost: l.unitPriceHkd.toFixed(4), avgCost: nextCostText }).where(eq(products.id, prod.id));
         }
         await tx.insert(stockMovements).values({
           shopId: input.shopId,
@@ -341,9 +478,9 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
           billId,
           movementType: moveType,
           legacyXc: xc,
-          onHandDelta: delta,
-          unitCost: currentCost,
-          movingAvgCostAfter: currentCost,
+          onHandDelta: deltaText,
+          unitCost: currentCost.toFixed(4),
+          movingAvgCostAfter: nextCostText,
         });
       }
     }
@@ -359,6 +496,7 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
         netAmountHkd: totals.netAmountHkd,
         paidAmountHkd: invoiceState.paidAmountHkd,
         balanceDueHkd: invoiceState.balanceDueHkd,
+        supersededInvoiceNo: input.supersedeInvoiceNo ?? null,
       },
     });
 
@@ -419,7 +557,7 @@ export async function settleInvoiceArTx(
       {
         invoiceNo: row.invoiceNo,
         docType: row.docType as BillDocType,
-        status: row.status as "completed" | "open" | "held" | "intraday" | "cancelled",
+        status: row.status as "completed" | "open" | "held" | "intraday" | "sealed" | "cancelled",
         paymentStatus: row.paymentStatus as "unpaid" | "partial" | "paid" | "voided",
         netAmountHkd: Number(row.netAmount),
         paidAmountHkd: Number(row.paidAmount),
@@ -501,31 +639,59 @@ export async function settleInvoiceArTx(
   });
 }
 
-export async function voidBillTx(
-  db: HarpDb,
-  input: { invoiceNo: string; staffId: number; reason: string },
+type DbTransaction = Parameters<Parameters<HarpDb["transaction"]>[0]>[0];
+
+async function voidLockedBillInsideTx(
+  tx: DbTransaction,
+  bill: typeof bills.$inferSelect,
+  staffId: number,
+  reason: string,
+  authorizedByStaffId?: number,
 ) {
-  return db.transaction(async (tx) => {
-    const locked = await tx.select().from(bills).where(eq(bills.invoiceNo, input.invoiceNo)).for("update");
-    if (locked.length === 0) throw new Error(`Bill ${input.invoiceNo} not found`);
-    const bill = locked[0]!;
-    if (bill.status === "cancelled") {
-      throw new Error(`Bill ${input.invoiceNo} is already voided`);
-    }
+  if (bill.status === "sealed") {
+    throw new Error(`Bill ${bill.invoiceNo} is sealed by day-end`);
+  }
+  if (bill.status === "cancelled") {
+    throw new Error(`Bill ${bill.invoiceNo} is already voided`);
+  }
+  const closedBatch = await tx
+    .select({ id: dayEndBatches.id })
+    .from(dayEndBatches)
+    .where(
+      and(
+        eq(dayEndBatches.shopId, bill.shopId),
+        eq(dayEndBatches.businessDate, bill.businessDate),
+        eq(dayEndBatches.closed, true),
+      ),
+    )
+    .limit(1);
+  if (closedBatch.length > 0) {
+    throw new Error(`Business date ${bill.businessDate} is sealed by day-end`);
+  }
 
-    await tx
-      .update(bills)
-      .set({ status: "cancelled", paymentStatus: "voided", balanceDue: "0.0000" })
-      .where(eq(bills.id, bill.id));
+  const wasHeld = bill.status === "held";
+  await tx
+    .update(bills)
+    .set({ status: "cancelled", paymentStatus: "voided", balanceDue: "0.0000" })
+    .where(eq(bills.id, bill.id));
 
+  if (!wasHeld) {
     await tx.update(billPayments).set({ voided: true }).where(eq(billPayments.billId, bill.id));
 
     const lines = await tx.select().from(billLines).where(eq(billLines.billId, bill.id));
-    if (bill.docType !== "PETTY_PAYOUT") {
-      const reverseSign = bill.docType === "SALES_RETURN" ? -1 : 1;
+    if (!NO_STOCK_DOC_TYPES.includes(bill.docType as BillDocType)) {
+      const originalMovements =
+        bill.docType === "STOCK_ADJUSTMENT" || bill.docType === "STOCKTAKE"
+          ? await tx.select().from(stockMovements).where(eq(stockMovements.billId, bill.id))
+          : [];
       for (const l of lines) {
         if (!l.productId || l.cancelled) continue;
-        const delta = (reverseSign * Number(l.quantity)).toFixed(4);
+        const originalDelta = originalMovements.find((movement) => movement.productId === l.productId)?.onHandDelta;
+        const delta = calculateVoidStockDelta(
+          bill.docType,
+          Number(l.quantity),
+          originalDelta === undefined ? undefined : Number(originalDelta),
+        ).toFixed(4);
         await tx
           .update(stockBalances)
           .set({ onHandQty: sql`${stockBalances.onHandQty} + ${delta}` })
@@ -562,17 +728,28 @@ export async function voidBillTx(
           .where(eq(customers.id, bill.customerId));
       }
     }
+  }
 
-    await tx.insert(auditLogs).values({
-      shopId: bill.shopId,
-      staffId: input.staffId,
-      action: "VOID_BILL",
-      entityType: "bills",
-      entityId: bill.invoiceNo,
-      details: { reason: input.reason },
-    });
+  await tx.insert(auditLogs).values({
+    shopId: bill.shopId,
+    staffId,
+    action: "VOID_BILL",
+    entityType: "bills",
+    entityId: bill.invoiceNo,
+    details: { reason, wasHeld, authorizedByStaffId: authorizedByStaffId ?? null },
+  });
 
-    return { ok: true, invoiceNo: bill.invoiceNo, status: "cancelled" as const };
+  return { ok: true, invoiceNo: bill.invoiceNo, status: "cancelled" as const };
+}
+
+export async function voidBillTx(
+  db: HarpDb,
+  input: { invoiceNo: string; staffId: number; reason: string; authorizedByStaffId?: number },
+) {
+  return db.transaction(async (tx) => {
+    const locked = await tx.select().from(bills).where(eq(bills.invoiceNo, input.invoiceNo)).for("update");
+    if (locked.length === 0) throw new Error(`Bill ${input.invoiceNo} not found`);
+    return voidLockedBillInsideTx(tx, locked[0]!, input.staffId, input.reason, input.authorizedByStaffId);
   });
 }
 
@@ -698,27 +875,39 @@ export async function closeDayEndBatchTx(
     staffId: number;
     businessDate: string;
     countedByTender: Array<{ tenderCode: string; countedAmountHkd: number }>;
+    authorizedByStaffId?: number;
   },
 ) {
   return db.transaction(async (tx) => {
     const [salesAgg] = await tx
-      .select({ totalNet: sql<string>`COALESCE(SUM(${bills.netAmount}), 0)` })
+      .select({
+        totalNet: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} = 'SALES_RETURN' THEN -${bills.netAmount} ELSE ${bills.netAmount} END), 0)`,
+      })
       .from(bills)
       .where(
         and(
           eq(bills.shopId, input.shopId),
           eq(bills.businessDate, input.businessDate),
           sql`${bills.status} <> 'cancelled'`,
+          inArray(bills.docType, ["RETAIL_SALE", "SALES_INVOICE", "SALES_RETURN"]),
         ),
       );
 
     const pmtGroups = await tx
       .select({
         tenderCode: billPayments.tenderCode,
-        totalCollected: sql<string>`COALESCE(SUM(${billPayments.amount}), 0)`,
+        totalCollected: sql<string>`COALESCE(SUM(CASE WHEN ${bills.docType} IN ('SALES_RETURN', 'PETTY_PAYOUT') THEN -${billPayments.amount} ELSE ${billPayments.amount} END), 0)`,
       })
       .from(billPayments)
-      .where(and(eq(billPayments.businessDate, input.businessDate), eq(billPayments.voided, false)))
+      .innerJoin(bills, eq(billPayments.billId, bills.id))
+      .where(
+        and(
+          eq(bills.shopId, input.shopId),
+          eq(billPayments.businessDate, input.businessDate),
+          eq(billPayments.voided, false),
+          sql`${bills.status} <> 'cancelled'`,
+        ),
+      )
       .groupBy(billPayments.tenderCode);
 
     const expectedMap = new Map(pmtGroups.map((p) => [p.tenderCode, Number(p.totalCollected)]));
@@ -736,6 +925,9 @@ export async function closeDayEndBatchTx(
         ),
       );
 
+    if (existingBatches.some((batch) => batch.closed)) {
+      throw new Error(`Business date ${input.businessDate} is already sealed`);
+    }
     const batchNo = existingBatches.length + 1;
     const legacyBk = `V2-${input.businessDate.replace(/-/g, "")}-${batchNo}-${crypto.randomInt(100, 999)}`;
     const res = await tx.insert(dayEndBatches).values({
@@ -808,13 +1000,30 @@ export async function closeDayEndBatchTx(
         });
     }
 
+    await tx
+      .update(bills)
+      .set({ status: "sealed" })
+      .where(
+        and(
+          eq(bills.shopId, input.shopId),
+          eq(bills.businessDate, input.businessDate),
+          eq(bills.status, "completed"),
+        ),
+      );
+
     await tx.insert(auditLogs).values({
       shopId: input.shopId,
       staffId: input.staffId,
       action: "CLOSE_DAY_END",
       entityType: "day_end_batches",
       entityId: String(batchId),
-      details: { businessDate: input.businessDate, batchNo, issuedSalesTotal, collectedPaymentsTotal },
+      details: {
+        businessDate: input.businessDate,
+        batchNo,
+        issuedSalesTotal,
+        collectedPaymentsTotal,
+        authorizedByStaffId: input.authorizedByStaffId ?? null,
+      },
     });
 
     return {

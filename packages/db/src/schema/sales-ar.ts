@@ -23,7 +23,7 @@ export const billSequences = mysqlTable(
     terminalId: int("terminal_id")
       .notNull()
       .references(() => terminals.id),
-    docType: varchar("doc_type", { length: 24 }).notNull(), // RETAIL_SALE | SALES_INVOICE | SALES_RETURN | PETTY_PAYOUT
+    docType: varchar("doc_type", { length: 24 }).notNull(), // Retail, invoice, return, payout, and OfficeX stock document types
     nextSeq: int("next_seq").notNull().default(1),
     updatedAt: datetime("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
@@ -45,13 +45,13 @@ export const bills = mysqlTable(
     staffId: int("staff_id").references(() => staff.id),
     customerId: int("customer_id").references(() => customers.id),
     invoiceNo: varchar("invoice_no", { length: 40 }).notNull(),
-    docType: varchar("doc_type", { length: 24 }).notNull(), // RETAIL_SALE | SALES_INVOICE | SALES_RETURN | PETTY_PAYOUT
+    docType: varchar("doc_type", { length: 24 }).notNull(), // Retail, invoice, return, payout, and OfficeX stock document types
     sourceTable: varchar("source_table", { length: 16 }).notNull().default("POS_V2"), // HistHeader | OfficeXHeader | POS_V2
     legacySc: varchar("legacy_sc", { length: 32 }),
     legacyXc: int("legacy_xc").notNull().default(99),
     legacyXt: int("legacy_xt").notNull().default(1),
     legacySd: int("legacy_sd").notNull().default(-1),
-    status: varchar("status", { length: 16 }).notNull().default("completed"), // open | held | intraday | completed | cancelled
+    status: varchar("status", { length: 16 }).notNull().default("completed"), // open | held | intraday | completed | sealed | cancelled
     paymentStatus: varchar("payment_status", { length: 16 }).notNull().default("unpaid"), // unpaid | partial | paid | voided
     businessDate: varchar("business_date", { length: 10 }).notNull(), // YYYY-MM-DD (HKT)
     grossAmount: decimal("gross_amount", { precision: 18, scale: 4 }).notNull().default("0.0000"),

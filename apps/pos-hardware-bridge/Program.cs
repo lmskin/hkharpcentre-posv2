@@ -9,12 +9,17 @@ var builder = WebApplication.CreateBuilder(args);
 var listenUrl = builder.Configuration["HardwareBridge:ListenUrl"] ?? "http://127.0.0.1:17880";
 builder.WebHost.UseUrls(listenUrl);
 
+var allowedOriginsRaw = builder.Configuration["HardwareBridge:AllowedOrigins"]
+    ?? "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3100,http://127.0.0.1:3100";
+var allowedOrigins = allowedOriginsRaw
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
         policy
-            .WithOrigins("http://localhost:3000", "http://127.0.0.1:3000")
+            .WithOrigins(allowedOrigins)
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
@@ -31,7 +36,10 @@ var configuredToken =
 var rwlDllPath = builder.Configuration["Octopus:RwlDllPath"] ?? @"C:\RWL\rwl.dll";
 var rwlIniPath = builder.Configuration["Octopus:RwlIniPath"] ?? @"C:\RWL\rwl.ini";
 var maxOctopusHkd = app.Configuration.GetValue("Octopus:MaxValueHkd", 3000);
-var simulatorEnabled = app.Configuration.GetValue("Octopus:SimulatorEnabled", false) || app.Environment.IsDevelopment();
+var simulatorEnabled =
+    string.Equals(Environment.GetEnvironmentVariable("OCTOPUS_SIMULATOR_ENABLED"), "true", StringComparison.OrdinalIgnoreCase)
+    || app.Configuration.GetValue("Octopus:SimulatorEnabled", false)
+    || app.Environment.IsDevelopment();
 var paxEdcEnabled = app.Configuration.GetValue("PaxEdc:Enabled", false);
 var journalFilePath = Path.Combine(
     app.Environment.ContentRootPath,
@@ -169,7 +177,38 @@ app.MapPost("/octopus/deduct", (HttpContext ctx, OctopusDeductRequest req) =>
     var probe = RwlNative.ProbeEnvironment(rwlDllPath, rwlIniPath);
     if (!probe.RwlDllPresent)
     {
-        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        if (!simulatorEnabled)
+        {
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
+
+        var simCard = string.IsNullOrWhiteSpace(req.ExpectedRetryCardId) ? "88419204" : req.ExpectedRetryCardId.Trim();
+        var simRecovered = incompleteLocks.TryRemove(req.BillRef, out _);
+        var simRemaining = Math.Max(0, 20000 - req.AmountCents);
+        lock (journalGate)
+        {
+            journalEntries.Add(new OctopusJournalEntry(
+                req.RequestId,
+                req.BillRef,
+                simCard,
+                "SIM-RWL-01",
+                req.AmountCents,
+                simRemaining,
+                simRecovered,
+                DateTimeOffset.UtcNow));
+        }
+        PersistState();
+        return Results.Ok(new
+        {
+            type = "OCTOPUS_APPROVED",
+            requestId = req.RequestId,
+            billRef = req.BillRef,
+            cardId = simCard,
+            deviceId = "SIM-RWL-01",
+            deductedCents = req.AmountCents,
+            remainingValueCents = simRemaining,
+            recoveredFrom100022 = simRecovered,
+        });
     }
 
     return Results.Ok(new

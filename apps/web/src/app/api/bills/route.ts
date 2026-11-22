@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { IssueBillOrInvoiceInputSchema } from "@hkharp/contracts";
-import { createBillOrInvoiceTx, requireSharedDb } from "@hkharp/db";
+import { createBillOrInvoiceTx, requireSharedDb, resolveActiveStoreContext } from "@hkharp/db";
 import { requireAuthenticatedSession } from "@/lib/session";
 
 export async function POST(request: Request) {
@@ -15,12 +15,17 @@ export async function POST(request: Request) {
 
   try {
     const { db } = requireSharedDb();
+    const storeCtx = await resolveActiveStoreContext();
     const result = await createBillOrInvoiceTx(db, {
       clientIdempotencyKey: parsed.data.clientIdempotencyKey,
-      shopId: auth.session.shopId || parsed.data.shopId,
-      terminalId: parsed.data.terminalId,
+      shopId: auth.session.shopId || storeCtx.shopId,
+      terminalId: parsed.data.terminalId ?? storeCtx.terminalId,
       staffId: auth.session.staffId,
       docType: parsed.data.docType,
+      status: parsed.data.status,
+      supersedeInvoiceNo: parsed.data.supersedeInvoiceNo,
+      createDeliveryOrder: parsed.data.createDeliveryOrder,
+      businessDateOverride: parsed.data.businessDateOverride,
       customerId: parsed.data.customerId,
       lines: parsed.data.lines,
       initialPayments: parsed.data.initialPayments,

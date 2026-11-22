@@ -11,6 +11,7 @@ const NAV_LINKS = [
   { href: "/backoffice/products", label: "Products" },
   { href: "/backoffice/customers", label: "Customers" },
   { href: "/backoffice/stock", label: "Stock" },
+  { href: "/backoffice/other-transactions", label: "Other Transactions" },
   { href: "/backoffice/day-end", label: "Day-End" },
   { href: "/backoffice/reports", label: "Reports" },
   { href: "/backoffice/settings", label: "Settings" },

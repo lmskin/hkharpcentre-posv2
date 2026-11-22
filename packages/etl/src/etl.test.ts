@@ -45,7 +45,7 @@ describe("V47 invoice AR classification", () => {
     });
   });
 
-  it("reads lossless UTF-8 Traditional Chinese rows via sqlcmd FOR JSON PATH (-y 0)", async () => {
+  it("reads lossless Traditional Chinese Big5 rows via sqlcmd FOR JSON PATH (-y 0)", async () => {
     const cfg = getDefaultLegacyConfig();
     const rows = await querySqlcmdJson<{ KY: number; zh: string; en: string }>(
       cfg.server,

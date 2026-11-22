@@ -3,3 +3,4 @@ export * from "./rounding";
 export * from "./bill-math";
 export * from "./crm-rules";
 export * from "./octopus-rules";
+export * from "./promotion-engine";
