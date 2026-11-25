@@ -317,17 +317,20 @@ async function main() {
       NN: string | null;
       TL1: string | null;
       EM: string | null;
+      AD1L1: string | null;
+      AD1L2: string | null;
+      AD1L3: string | null;
       BPT1: number | null;
       EX: boolean;
     }>(
       legacy.server,
       legacy.gsDatabase,
-      "SELECT RTRIM(S.ID) AS ID, S.SGR, S.N1L, S.N2L, S.NN, S.TL1, S.EM, S.BPT1, CAST(S.EX AS BIT) AS EX FROM dbo.StaffCounterparty S WHERE RTRIM(S.TP) = '2'",
+      "SELECT RTRIM(S.ID) AS ID, S.SGR, S.N1L, S.N2L, S.NN, S.TL1, S.EM, S.AD1L1, S.AD1L2, S.AD1L3, S.BPT1, CAST(S.EX AS BIT) AS EX FROM dbo.StaffCounterparty S WHERE RTRIM(S.TP) = '2'",
     );
     await execBatchUpsert(
       conn,
-      "INSERT INTO customers (legacy_id, grade_id, name_zh, name_en, phone, email, points_balance, active) VALUES",
-      8,
+      "INSERT INTO customers (legacy_id, grade_id, name_zh, name_en, phone, email, address, points_balance, active) VALUES",
+      9,
       custRows.map((c) => [
         clampStr(c.ID, 32),
         c.SGR !== null ? (gradeIdByCode.get(Number(c.SGR)) ?? null) : null,
@@ -335,10 +338,11 @@ async function main() {
         clampStr(c.N2L || "", 160),
         clampStr(c.TL1 || "", 40),
         clampStr(c.EM || "", 160),
+        clampStr([c.AD1L1, c.AD1L2, c.AD1L3].map((x) => (x ?? "").trim()).filter(Boolean).join(", "), 300),
         Math.round(Number(c.BPT1 ?? 0)),
         c.EX ? 0 : 1,
       ]),
-      "ON DUPLICATE KEY UPDATE points_balance = VALUES(points_balance), active = VALUES(active)",
+      "ON DUPLICATE KEY UPDATE address = VALUES(address), points_balance = VALUES(points_balance), active = VALUES(active)",
     );
     const [custDbRows] = await conn.query("SELECT id, legacy_id FROM customers");
     const customerIdByLegacyId = new Map<string, number>();
@@ -420,6 +424,8 @@ async function main() {
       UBC: string | null;
       PN1L: string | null;
       PN2L: string | null;
+      COLR: string | null;
+      SIZ: string | null;
       C1: number;
       UN: number;
       SEP: number | null;
@@ -430,12 +436,12 @@ async function main() {
     }>(
       legacy.server,
       legacy.gsDatabase,
-      "SELECT SN, RTRIM(BC) AS BC, RTRIM(ISNULL(UBC,'')) AS UBC, PN1L, PN2L, C1, UN, SEP, CAST(FP AS BIT) AS FP, LP, AVPP, ED FROM dbo.ProductOnSale",
+      "SELECT SN, RTRIM(BC) AS BC, RTRIM(ISNULL(UBC,'')) AS UBC, PN1L, PN2L, RTRIM(ISNULL(COLR,'')) AS COLR, RTRIM(ISNULL(SIZ,'')) AS SIZ, C1, UN, SEP, CAST(FP AS BIT) AS FP, LP, AVPP, ED FROM dbo.ProductOnSale",
     );
     await execBatchUpsert(
       conn,
-      "INSERT INTO products (shop_id, barcode, ubc, name_zh, name_en, category_id, legacy_c1, unit_id, sell_price, fixed_price, last_purchase_cost, avg_cost, allow_item_discount, exclude_from_crm_bonus, active) VALUES",
-      15,
+      "INSERT INTO products (shop_id, barcode, ubc, name_zh, name_en, color_name, size_name, category_id, legacy_c1, unit_id, sell_price, fixed_price, last_purchase_cost, avg_cost, allow_item_discount, exclude_from_crm_bonus, active) VALUES",
+      17,
       prodRows.map((p) => {
         const sep = toDec4(p.SEP);
         return [
@@ -444,6 +450,8 @@ async function main() {
           clampStr(p.UBC, 40),
           clampStr(p.PN1L || p.BC, 200),
           clampStr(p.PN2L || "", 200),
+          clampStr(p.COLR || "", 80),
+          clampStr(p.SIZ || "", 80),
           categoryIdByC1.get(p.C1) ?? null,
           p.C1,
           unitIdByUn.get(p.UN) ?? null,
@@ -456,7 +464,7 @@ async function main() {
           1,
         ];
       }),
-      "ON DUPLICATE KEY UPDATE name_zh = VALUES(name_zh), name_en = VALUES(name_en), sell_price = VALUES(sell_price), avg_cost = VALUES(avg_cost)",
+      "ON DUPLICATE KEY UPDATE name_zh = VALUES(name_zh), name_en = VALUES(name_en), color_name = VALUES(color_name), size_name = VALUES(size_name), sell_price = VALUES(sell_price), avg_cost = VALUES(avg_cost)",
     );
 
     const [prodDbRows] = await conn.query("SELECT id, barcode FROM products");
@@ -480,25 +488,48 @@ async function main() {
     );
 
     // 6b. POS Menu Groups & Buttons (390 rows across BBG groups)
+    const LEGACY_CATEGORY1_META: Record<number, { titleZh: string; titleEn: string; sortOrder: number }> = {
+      1: { titleZh: "BOW BRAND PEDAL GUT", titleEn: "BOW BRAND PEDAL GUT", sortOrder: 2 },
+      6: { titleZh: "Burgundy", titleEn: "Burgundy", sortOrder: 3 },
+      7: { titleZh: "Pedal Nylon", titleEn: "Pedal Nylon", sortOrder: 4 },
+      8: { titleZh: "Silkgut", titleEn: "Silkgut", sortOrder: 5 },
+      9: { titleZh: "Lever Gut", titleEn: "Lever Gut", sortOrder: 6 },
+      10: { titleZh: "Lever Wire", titleEn: "Lever Wire", sortOrder: 7 },
+      11: { titleZh: "Pedal Wire", titleEn: "Pedal Wire", sortOrder: 8 },
+      5: { titleZh: "OTHERS", titleEn: "OTHERS", sortOrder: 12 },
+      12: { titleZh: "SILKGUT COPPER", titleEn: "SILKGUT COPPER", sortOrder: 13 },
+      14: { titleZh: "BIO LEVER", titleEn: "BIO LEVER", sortOrder: 16 },
+      15: { titleZh: "BIO PEDAL", titleEn: "BIO PEDAL", sortOrder: 18 },
+      16: { titleZh: "GUT GOLD", titleEn: "GUT GOLD", sortOrder: 19 },
+      17: { titleZh: "BioNylon", titleEn: "BioNylon", sortOrder: 20 },
+      20: { titleZh: "SIPARIO PEDAL WIRE", titleEn: "SIPARIO PEDAL WIRE", sortOrder: 21 },
+      21: { titleZh: "SIPARIO LEVER GUT", titleEn: "SIPARIO LEVER GUT", sortOrder: 22 },
+      22: { titleZh: "SIPARIO LEVER WIRE", titleEn: "SIPARIO LEVER WIRE", sortOrder: 23 },
+      18: { titleZh: "Sipario Silkgut", titleEn: "Sipario Silkgut", sortOrder: 25 },
+      92: { titleZh: "PAYOUT", titleEn: "PAYOUT", sortOrder: 920 },
+    };
+
     const menuRows = await querySqlcmdJson<{
       SN: number;
       BBG: number;
-      grid_pos: number;
+      FT: number;
+      BLI: number;
       BC: string;
       BLA1L: string | null;
       BLA2L: string | null;
       COLOR: string | null;
       PN1L: string | null;
       PN2L: string | null;
+      SN1L: string | null;
+      SN2L: string | null;
     }>(
       legacy.server,
       legacy.gsDatabase,
-      `SELECT M.SN, M.BBG,
-              ROW_NUMBER() OVER (PARTITION BY M.BBG ORDER BY M.SN, M.BLI, M.FT) AS grid_pos,
-              RTRIM(M.BC) AS BC, M.BLA1L, M.BLA2L, M.COLOR, P.PN1L, P.PN2L
+      `SELECT M.SN, M.BBG, M.FT, M.BLI,
+              RTRIM(M.BC) AS BC, M.BLA1L, M.BLA2L, M.COLOR, P.PN1L, P.PN2L, P.SN1L, P.SN2L
        FROM dbo.Menu M
        LEFT JOIN dbo.ProductOnSale P ON RTRIM(P.BC) = RTRIM(M.BC)
-       ORDER BY M.BBG, grid_pos`,
+       ORDER BY M.BBG, M.FT, M.BLI, M.SN`,
     );
     const activeShopId = shopIdBySn.get(1) ?? shopIdBySn.get(0)!;
     const uniqueBbgs = Array.from(new Set(menuRows.map((m) => m.BBG))).sort((a, b) => a - b);
@@ -506,8 +537,17 @@ async function main() {
       conn,
       "INSERT INTO pos_menus (shop_id, code, title_zh, title_en, sort_order) VALUES",
       5,
-      uniqueBbgs.map((bbg) => [activeShopId, `BBG_${bbg}`, `菜單組 ${bbg}`, `Menu Group ${bbg}`, bbg]),
-      "ON DUPLICATE KEY UPDATE sort_order = VALUES(sort_order)",
+      uniqueBbgs.map((bbg) => {
+        const meta = LEGACY_CATEGORY1_META[bbg];
+        return [
+          activeShopId,
+          `BBG_${bbg}`,
+          meta?.titleZh ?? `Menu Group ${bbg}`,
+          meta?.titleEn ?? `Menu Group ${bbg}`,
+          meta?.sortOrder ?? bbg,
+        ];
+      }),
+      "ON DUPLICATE KEY UPDATE title_zh = VALUES(title_zh), title_en = VALUES(title_en), sort_order = VALUES(sort_order)",
     );
     const [menuDbRows] = await conn.query("SELECT id, code FROM pos_menus WHERE shop_id = ?", [activeShopId]);
     const menuIdByCode = new Map<string, number>();
@@ -522,9 +562,9 @@ async function main() {
       menuRows.map((m) => [
         menuIdByCode.get(`BBG_${m.BBG}`)!,
         productIdByBc.get(clampStr(m.BC, 40)) ?? null,
-        clampStr(m.BLA1L || m.PN1L || m.BC, 80),
-        clampStr(m.BLA2L || m.PN2L || m.PN1L || m.BC, 80),
-        m.grid_pos,
+        clampStr(m.BLA1L?.trim() || m.SN1L?.trim() || m.PN1L?.trim() || m.BC, 80),
+        clampStr(m.BLA2L?.trim() || m.SN2L?.trim() || m.SN1L?.trim() || m.PN2L?.trim() || m.PN1L?.trim() || m.BC, 80),
+        m.SN * 10000 + m.FT * 100 + m.BLI,
         clampStr(m.COLOR, 16) || null,
       ]),
       "ON DUPLICATE KEY UPDATE product_id = VALUES(product_id), label_zh = VALUES(label_zh), label_en = VALUES(label_en)",

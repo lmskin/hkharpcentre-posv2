@@ -7,7 +7,7 @@ export default function StockBackOfficePage() {
   const router = useRouter();
   return (
     <div className="fixed inset-0 z-40 bg-[#f0f0f0]">
-      <StockPanel onClose={() => router.push("/pos")} />
+      <StockPanel onClose={() => router.push("/")} />
     </div>
   );
 }

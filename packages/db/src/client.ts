@@ -37,6 +37,11 @@ export function createDb(databaseUrl: string) {
     uri: databaseUrl,
     waitForConnections: true,
     connectionLimit: 10,
+    maxIdle: 5,
+    idleTimeout: 30_000,
+    connectTimeout: 15_000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10_000,
     decimalNumbers: false, // Preserve exact DECIMAL(18,4) strings
     timezone: "+08:00",
   });

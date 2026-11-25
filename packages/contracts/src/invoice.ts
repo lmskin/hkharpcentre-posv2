@@ -46,6 +46,8 @@ export const BillLineInputSchema = z.object({
   lineDiscountAmountHkd: z.number().nonnegative().default(0),
   isFixedPrice: z.boolean().default(false),
   excludeFromCrmBonus: z.boolean().default(false),
+  notes: z.string().max(300).optional(),
+  serialNo: z.string().max(80).optional(),
 });
 export type BillLineInput = z.infer<typeof BillLineInputSchema>;
 

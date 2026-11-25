@@ -124,7 +124,7 @@ export interface HourlyReportRow {
 /** Legacy fmdhsales / dhsales 24-hour + 4 business-period + tender + void breakdown report. */
 export async function getHourlySalesReport(businessDate: string, shopId: number) {
   const { pool } = requireSharedDb();
-  const [billRows, pmtRows, voidRows, voidLineRows] = await Promise.all([
+  const [billRows, pmtRows, voidRows, voidLineRows, floatRows] = await Promise.all([
     pool.query<SqlRow[]>(
       `SELECT
         HOUR(b.issued_at) AS hr,
@@ -178,7 +178,18 @@ export async function getHourlySalesReport(businessDate: string, shopId: number)
         AND (b.status = 'cancelled' OR bl.cancelled = 1)`,
       [shopId, businessDate],
     ),
+    pool.query<SqlRow[]>(
+      `SELECT setting_value FROM app_settings WHERE shop_id = ? AND setting_key = ? LIMIT 1`,
+      [shopId, `opening_float_${businessDate}`],
+    ),
   ]);
+
+  const rawFloatVal = floatRows[0][0]?.setting_value;
+  const parsedFloatObj =
+    typeof rawFloatVal === "string"
+      ? (JSON.parse(rawFloatVal) as { amountHkd?: number } | null)
+      : (rawFloatVal as { amountHkd?: number } | null);
+  const openingFloatHkd = round2(num(parsedFloatObj?.amountHkd));
 
   const byHour = new Map<number, SqlRow>();
   for (const r of billRows[0]) byHour.set(num(r.hr), r);
@@ -267,6 +278,8 @@ export async function getHourlySalesReport(businessDate: string, shopId: number)
     cancelledBillCount: num(voidRows[0][0]?.cancelled_bills),
     cancelledAmountHkd: round2(num(voidRows[0][0]?.cancelled_amt)),
     cancelledLineCount: num(voidLineRows[0][0]?.cancelled_lines),
+    openingFloatHkd,
+    cashNetHkd: tenderTotals.CASH ?? 0,
   };
 }
 
@@ -2440,5 +2453,267 @@ export async function getManagerStatsReport(params: { fromDate: string; toDate: 
       detailsSummary: r.details ? (typeof r.details === "string" ? r.details : JSON.stringify(r.details)) : "",
       createdAtIso: new Date(r.created_at as string | Date).toISOString(),
     })),
+  };
+}
+
+export async function getLegacyStatsReport(params: {
+  kind: "sales" | "member" | "staff";
+  fromDate: string;
+  toDate: string;
+  shopId: number;
+  q?: string;
+  matchMode?: "prefix" | "contains" | "suffix";
+  categoryC1?: number;
+  sortBy?: "default" | "qty_desc" | "sales_desc" | "sales_asc";
+}) {
+  const t0 = Date.now();
+  const { pool } = requireSharedDb();
+  const cleanQ = params.q?.trim() ?? "";
+  const pat =
+    cleanQ === ""
+      ? ""
+      : params.matchMode === "prefix"
+        ? `${cleanQ}%`
+        : params.matchMode === "suffix"
+          ? `%${cleanQ}`
+          : `%${cleanQ}%`;
+
+  const orderClause =
+    params.sortBy === "qty_desc"
+      ? "qty DESC"
+      : params.sortBy === "sales_desc"
+        ? "net_sales DESC"
+        : params.sortBy === "sales_asc"
+          ? "net_sales ASC"
+          : null;
+
+  if (params.kind === "sales") {
+    const where = [
+      "b.shop_id = ?",
+      "b.business_date >= ?",
+      "b.business_date <= ?",
+      "b.status NOT IN ('cancelled', 'held')",
+      `b.doc_type IN (${SALES_DOC_TYPES_SQL})`,
+      "bl.cancelled = 0",
+      "bl.legacy_dk > 0",
+    ];
+    const args: Array<string | number> = [params.shopId, params.fromDate, params.toDate];
+    if (params.categoryC1 !== undefined && Number.isFinite(params.categoryC1)) {
+      where.push("bl.category_c1 = ?");
+      args.push(params.categoryC1);
+    }
+    if (pat) {
+      where.push("(bl.sku LIKE ? OR COALESCE(p.ubc, '') LIKE ? OR bl.name_zh LIKE ? OR bl.name_en LIKE ?)");
+      args.push(pat, pat, pat, pat);
+    }
+
+    const [rows] = await pool.query<SqlRow[]>(
+      `SELECT
+        bl.sku,
+        MAX(bl.product_id) AS product_id,
+        MAX(COALESCE(p.ubc, '')) AS ubc,
+        MAX(COALESCE(NULLIF(p.name_zh, ''), NULLIF(bl.name_zh, ''), bl.name_en, bl.sku)) AS product_name,
+        MAX(COALESCE(NULLIF(bl.name_zh, ''), bl.name_en, bl.sku)) AS barcode_name,
+        MAX(bl.category_c1) AS category_c1,
+        MAX(COALESCE(u.name_zh, '(找不到)')) AS unit_name,
+        MAX(COALESCE(pmb.btn_label, '')) AS size_hint,
+        COUNT(DISTINCT b.id) AS bill_count,
+        COALESCE(SUM(CASE WHEN b.doc_type = 'SALES_RETURN' THEN -bl.quantity ELSE bl.quantity END), 0) AS qty,
+        COALESCE(SUM(CASE WHEN b.doc_type = 'SALES_RETURN' THEN -bl.line_total ELSE bl.line_total END), 0) AS net_sales,
+        COALESCE(SUM((CASE WHEN b.doc_type = 'SALES_RETURN' THEN -bl.quantity ELSE bl.quantity END) * COALESCE(sb.moving_avg_cost, p.avg_cost, 0)), 0) AS cost_av
+      FROM bill_lines bl
+      INNER JOIN bills b ON b.id = bl.bill_id
+      LEFT JOIN products p ON p.id = bl.product_id
+      LEFT JOIN units u ON u.id = p.unit_id
+      LEFT JOIN stock_balances sb ON sb.product_id = bl.product_id AND sb.shop_id = b.shop_id
+      LEFT JOIN (
+        SELECT product_id, MAX(label_zh) AS btn_label
+        FROM pos_menu_buttons
+        WHERE product_id IS NOT NULL
+        GROUP BY product_id
+      ) pmb ON pmb.product_id = bl.product_id
+      WHERE ${where.join(" AND ")}
+      GROUP BY bl.sku
+      ORDER BY ${orderClause ?? "category_c1 ASC, bl.sku ASC"}
+      LIMIT 600`,
+      args,
+    );
+
+    const productIds = rows.map((r) => num(r.product_id)).filter((id) => id > 0);
+    const supByProd = new Map<number, string>();
+    if (productIds.length > 0) {
+      const ph = productIds.map(() => "?").join(",");
+      const [supRows] = await pool.query<SqlRow[]>(
+        `SELECT bl2.product_id, MAX(COALESCE(NULLIF(sup.name_zh, ''), NULLIF(b2.legacy_sc, ''), '')) AS sup_name
+         FROM bill_lines bl2
+         INNER JOIN bills b2 ON b2.id = bl2.bill_id
+         LEFT JOIN suppliers sup ON sup.legacy_id = b2.legacy_sc
+         WHERE b2.shop_id = ?
+           AND b2.doc_type = 'GOODS_RECEIPT'
+           AND b2.status <> 'cancelled'
+           AND bl2.product_id IN (${ph})
+         GROUP BY bl2.product_id`,
+        [params.shopId, ...productIds],
+      );
+      for (const s of supRows) supByProd.set(num(s.product_id), str(s.sup_name));
+    }
+
+    const mapped = rows.map((r) => {
+      const salesValueHkd = round2(num(r.net_sales));
+      const costAvHkd = round2(num(r.cost_av));
+      const estGrossProfitHkd = round2(salesValueHkd - costAvHkd);
+      const pName = str(r.product_name);
+      const bName = str(r.barcode_name);
+      const sHint = str(r.size_hint);
+      return {
+        productName: pName,
+        ubc: str(r.ubc) || str(r.sku),
+        sku: str(r.sku),
+        barcodeName: bName,
+        color: "",
+        size: sHint && sHint !== pName ? sHint : "",
+        supplier: supByProd.get(num(r.product_id)) ?? "",
+        unit: str(r.unit_name) || "(找不到)",
+        categoryC1: num(r.category_c1),
+        billCount: num(r.bill_count),
+        quantity: round2(num(r.qty)),
+        salesValueHkd,
+        estGrossProfitHkd,
+      };
+    });
+
+    return {
+      kind: "sales" as const,
+      range: { fromDate: params.fromDate, toDate: params.toDate },
+      elapsedSec: Number(((Date.now() - t0) / 1000).toFixed(1)),
+      rows: mapped,
+    };
+  }
+
+  if (params.kind === "member") {
+    const where = [
+      "b.shop_id = ?",
+      "b.business_date >= ?",
+      "b.business_date <= ?",
+      "b.status NOT IN ('cancelled', 'held')",
+      `b.doc_type IN (${SALES_DOC_TYPES_SQL})`,
+      "bl.cancelled = 0",
+      "bl.legacy_dk > 0",
+    ];
+    const args: Array<string | number> = [params.shopId, params.fromDate, params.toDate];
+    if (pat) {
+      where.push(
+        "(COALESCE(c.legacy_id, '0') LIKE ? OR COALESCE(c.name_zh, '') LIKE ? OR COALESCE(c.name_en, '') LIKE ? OR COALESCE(c.phone, '') LIKE ?)",
+      );
+      args.push(pat, pat, pat, pat);
+    }
+
+    const [rows] = await pool.query<SqlRow[]>(
+      `SELECT
+        COALESCE(c.legacy_id, '0') AS customer_code,
+        MAX(COALESCE(NULLIF(c.name_zh, ''), NULLIF(c.name_en, ''), '一般顧客')) AS customer_name,
+        b.business_date,
+        COUNT(DISTINCT b.id) AS bill_count,
+        COALESCE(SUM(CASE WHEN b.doc_type = 'SALES_RETURN' THEN -bl.quantity ELSE bl.quantity END), 0) AS qty,
+        COALESCE(SUM(CASE WHEN b.doc_type = 'SALES_RETURN' THEN -bl.line_total ELSE bl.line_total END), 0) AS net_sales,
+        COALESCE(SUM((CASE WHEN b.doc_type = 'SALES_RETURN' THEN -bl.quantity ELSE bl.quantity END) * COALESCE(sb.moving_avg_cost, p.avg_cost, 0)), 0) AS cost_av
+      FROM bill_lines bl
+      INNER JOIN bills b ON b.id = bl.bill_id
+      LEFT JOIN customers c ON c.id = b.customer_id
+      LEFT JOIN products p ON p.id = bl.product_id
+      LEFT JOIN stock_balances sb ON sb.product_id = bl.product_id AND sb.shop_id = b.shop_id
+      WHERE ${where.join(" AND ")}
+      GROUP BY COALESCE(c.legacy_id, '0'), b.business_date
+      ORDER BY ${orderClause ?? "customer_code ASC, b.business_date ASC"}
+      LIMIT 600`,
+      args,
+    );
+
+    const mapped = rows.map((r) => {
+      const code = str(r.customer_code);
+      const rawName = str(r.customer_name);
+      const salesValueHkd = round2(num(r.net_sales));
+      const costAvHkd = round2(num(r.cost_av));
+      return {
+        customerCode: code,
+        customerName: `${code}-${rawName}`,
+        businessDate: str(r.business_date),
+        billCount: num(r.bill_count),
+        quantity: round2(num(r.qty)),
+        salesValueHkd,
+        estGrossProfitHkd: round2(salesValueHkd - costAvHkd),
+      };
+    });
+
+    return {
+      kind: "member" as const,
+      range: { fromDate: params.fromDate, toDate: params.toDate },
+      elapsedSec: Number(((Date.now() - t0) / 1000).toFixed(1)),
+      rows: mapped,
+    };
+  }
+
+  // kind === "staff"
+  const where = [
+    "b.shop_id = ?",
+    "b.business_date >= ?",
+    "b.business_date <= ?",
+    "b.status NOT IN ('cancelled', 'held')",
+    `b.doc_type IN (${SALES_DOC_TYPES_SQL})`,
+    "bl.cancelled = 0",
+    "bl.legacy_dk > 0",
+  ];
+  const args: Array<string | number> = [params.shopId, params.fromDate, params.toDate];
+  if (pat) {
+    where.push(
+      "(COALESCE(sf.legacy_id, '0') LIKE ? OR COALESCE(sf.display_name, '') LIKE ? OR bl.sku LIKE ? OR bl.name_zh LIKE ? OR bl.name_en LIKE ?)",
+    );
+    args.push(pat, pat, pat, pat, pat);
+  }
+
+  const [rows] = await pool.query<SqlRow[]>(
+    `SELECT
+      COALESCE(sf.legacy_id, '0') AS staff_code,
+      MAX(COALESCE(sf.display_name, 'Unassigned')) AS staff_name,
+      b.business_date,
+      bl.sku,
+      MAX(COALESCE(NULLIF(bl.name_zh, ''), bl.name_en, bl.sku)) AS barcode_name,
+      COUNT(DISTINCT b.id) AS bill_count,
+      COALESCE(SUM(CASE WHEN b.doc_type = 'SALES_RETURN' THEN -bl.quantity ELSE bl.quantity END), 0) AS qty,
+      COALESCE(SUM(CASE WHEN b.doc_type = 'SALES_RETURN' THEN -bl.line_total ELSE bl.line_total END), 0) AS net_sales,
+      COALESCE(SUM((CASE WHEN b.doc_type = 'SALES_RETURN' THEN -bl.quantity ELSE bl.quantity END) * COALESCE(sb.moving_avg_cost, p.avg_cost, 0)), 0) AS cost_av
+    FROM bill_lines bl
+    INNER JOIN bills b ON b.id = bl.bill_id
+    LEFT JOIN staff sf ON sf.id = b.staff_id
+    LEFT JOIN products p ON p.id = bl.product_id
+    LEFT JOIN stock_balances sb ON sb.product_id = bl.product_id AND sb.shop_id = b.shop_id
+    WHERE ${where.join(" AND ")}
+    GROUP BY COALESCE(sf.legacy_id, '0'), b.business_date, bl.sku
+    ORDER BY ${orderClause ?? "staff_code ASC, b.business_date ASC, barcode_name ASC"}
+    LIMIT 600`,
+    args,
+  );
+
+  const mapped = rows.map((r) => {
+    const salesValueHkd = round2(num(r.net_sales));
+    const costAvHkd = round2(num(r.cost_av));
+    return {
+      staffCode: str(r.staff_code),
+      staffName: str(r.staff_name),
+      businessDate: str(r.business_date),
+      sku: str(r.sku),
+      barcodeName: str(r.barcode_name),
+      billCount: num(r.bill_count),
+      quantity: round2(num(r.qty)),
+      salesValueHkd,
+      estGrossProfitHkd: round2(salesValueHkd - costAvHkd),
+    };
+  });
+
+  return {
+    kind: "staff" as const,
+    range: { fromDate: params.fromDate, toDate: params.toDate },
+    elapsedSec: Number(((Date.now() - t0) / 1000).toFixed(1)),
+    rows: mapped,
   };
 }

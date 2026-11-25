@@ -46,6 +46,8 @@ export const products = mysqlTable(
     ubc: varchar("ubc", { length: 40 }).notNull().default(""),
     nameZh: varchar("name_zh", { length: 200 }).notNull(),
     nameEn: varchar("name_en", { length: 200 }).notNull().default(""),
+    colorName: varchar("color_name", { length: 80 }).notNull().default(""),
+    sizeName: varchar("size_name", { length: 80 }).notNull().default(""),
     categoryId: int("category_id").references(() => categories.id),
     legacyC1: int("legacy_c1").notNull().default(0),
     unitId: int("unit_id").references(() => units.id),

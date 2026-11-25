@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { AutoSuggestInput } from "@/components/AutoSuggestInput";
 
 interface SupplierRow {
   id: number;
@@ -78,8 +79,13 @@ export default function SuppliersBackOfficePage() {
             <h1 className="text-lg font-bold text-slate-900">Suppliers Master (StaffCounterparty TP=&apos;1&apos;)</h1>
             <div className="text-xs text-slate-500">Total {total} suppliers</div>
           </div>
-          <input
+          <AutoSuggestInput
+            theme="modern"
             type="search"
+            name="supplierSearch"
+            autoComplete="on"
+            suggestKind="supplier"
+            historyKey="bo_sup_search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search code, name, or phone..."
@@ -136,7 +142,13 @@ export default function SuppliersBackOfficePage() {
         <form onSubmit={(e) => void handleSave(e)} className="mt-4 space-y-3 text-xs">
           <div>
             <label className="block font-medium text-slate-600">Supplier Code (optional)</label>
-            <input
+            <AutoSuggestInput
+              theme="modern"
+              name="supplierLegacyId"
+              autoComplete="on"
+              suggestKind="supplier"
+              valueField="legacyId"
+              historyKey="bo_sup_code"
               value={legacyId}
               onChange={(e) => setLegacyId(e.target.value)}
               placeholder="Auto SUP... if blank"
@@ -145,7 +157,13 @@ export default function SuppliersBackOfficePage() {
           </div>
           <div>
             <label className="block font-medium text-slate-600">Chinese Name</label>
-            <input
+            <AutoSuggestInput
+              theme="modern"
+              name="supplierNameZh"
+              autoComplete="organization"
+              suggestKind="supplier"
+              valueField="nameZh"
+              historyKey="bo_sup_namezh"
               value={nameZh}
               onChange={(e) => setNameZh(e.target.value)}
               className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
@@ -154,7 +172,13 @@ export default function SuppliersBackOfficePage() {
           </div>
           <div>
             <label className="block font-medium text-slate-600">English Name</label>
-            <input
+            <AutoSuggestInput
+              theme="modern"
+              name="supplierNameEn"
+              autoComplete="organization"
+              suggestKind="supplier"
+              valueField="nameEn"
+              historyKey="bo_sup_nameen"
               value={nameEn}
               onChange={(e) => setNameEn(e.target.value)}
               className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
@@ -162,7 +186,14 @@ export default function SuppliersBackOfficePage() {
           </div>
           <div>
             <label className="block font-medium text-slate-600">Phone</label>
-            <input
+            <AutoSuggestInput
+              theme="modern"
+              type="tel"
+              name="supplierPhone"
+              autoComplete="tel"
+              suggestKind="supplier"
+              valueField="phone"
+              historyKey="bo_sup_phone"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
               className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"

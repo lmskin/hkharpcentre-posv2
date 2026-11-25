@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { formatHkd } from "@hkharp/domain/money";
+import { AutoSuggestInput } from "@/components/AutoSuggestInput";
 import type { PosProduct } from "@/components/PosRegisterClient";
 
 export type OfficeDocType =
@@ -32,6 +33,8 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
   const [docType, setDocType] = useState<OfficeDocType>(initialType);
   const [suppliers, setSuppliers] = useState<SupplierItem[]>([]);
   const [selectedSupplier, setSelectedSupplier] = useState("");
+  const [txnDate, setTxnDate] = useState(() => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Hong_Kong" }).format(new Date()));
+  const [transferShop, setTransferShop] = useState("Warehouse(0)");
   const [reference, setReference] = useState("");
   const [notes, setNotes] = useState("");
   const [query, setQuery] = useState("");
@@ -81,14 +84,19 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
     try {
       const supplierLegacyId =
         docType === "GOODS_RECEIPT" || docType === "PURCHASE_RETURN" ? selectedSupplier || undefined : undefined;
+      const transferRef =
+        docType === "STOCK_TRANSFER_OUT" || docType === "STOCK_TRANSFER_IN"
+          ? [transferShop, reference].filter(Boolean).join(" · ")
+          : reference;
       const res = await fetch("/api/office-txn", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           clientIdempotencyKey: `office-${crypto.randomUUID()}`,
           docType,
+          businessDateOverride: txnDate || undefined,
           supplierLegacyId,
-          reference,
+          reference: transferRef,
           notes,
           lines,
         }),
@@ -102,11 +110,52 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
   }
 
   return (
-    <div className="absolute inset-0 z-20 bg-black/10 p-3" role="dialog" aria-modal="true" aria-label="其他交易">
+    <div
+      className="absolute inset-0 z-20 bg-black/10 p-3"
+      role="dialog"
+      aria-modal="true"
+      aria-label="其他交易"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") e.preventDefault();
+        if (e.key === "F1") {
+          e.preventDefault();
+          onClose();
+        }
+        if (e.key === "F12") {
+          e.preventDefault();
+          void submit();
+        }
+      }}
+    >
       <div className="flex h-full flex-col border border-[#808080] bg-[#f0f0f0] shadow-[4px_4px_8px_rgba(0,0,0,0.4)]">
         <div className="border-b border-[#d4d0c8] px-2 py-1 text-[12px] font-bold text-black">其他交易 - {type.label}</div>
         <div className="flex border-b border-[#aca899]">{TYPES.map((item) => <button key={item.id} type="button" onClick={() => { setDocType(item.id); setCompletedNo(""); }} className={`border-r border-[#aca899] px-5 py-1 text-[12px] ${docType === item.id ? "bg-white font-bold text-black" : "bg-[#f0f0f0] text-black"}`}>{item.label}</button>)}</div>
         <div className="flex flex-wrap items-center gap-2 border-b border-[#aca899] p-2 text-[12px] text-black">
+          <label>
+            單據日期
+            <input
+              type="date"
+              aria-label="單據日期"
+              value={txnDate}
+              onChange={(e) => setTxnDate(e.target.value)}
+              className={`${input} ml-1`}
+            />
+          </label>
+          {docType === "STOCK_TRANSFER_OUT" || docType === "STOCK_TRANSFER_IN" ? (
+            <label>
+              對方分店
+              <select
+                aria-label="對方分店"
+                value={transferShop}
+                onChange={(e) => setTransferShop(e.target.value)}
+                className={`${input} ml-1`}
+              >
+                <option value="Warehouse(0)">Warehouse(0)</option>
+                <option value="Central(1)">Central(1)</option>
+                <option value="Office">Office (寫字樓)</option>
+              </select>
+            </label>
+          ) : null}
           {docType === "GOODS_RECEIPT" || docType === "PURCHASE_RETURN" ? (
             <label>
               供應商
@@ -133,8 +182,8 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
               </select>
             </label>
           ) : null}
-          <label>{type.reference}<input value={reference} onChange={(event) => setReference(event.target.value)} className={`${input} ml-2 w-56`} /></label>
-          <label>備註<input value={notes} onChange={(event) => setNotes(event.target.value)} className={`${input} ml-2 w-48`} /></label>
+          <label>{type.reference}<AutoSuggestInput theme="legacy" name="officeReference" autoComplete="on" suggestKind={docType === "GOODS_RECEIPT" || docType === "PURCHASE_RETURN" ? "supplier" : "payment_ref"} suggestions={docType === "WRITE_OFF" ? ["破損報銷", "陳列老化", "過期/失竊"] : docType === "STOCK_ADJUSTMENT" ? ["盤點修正", "入帳更正"] : docType === "PETTY_PAYOUT" ? ["順豐運費", "日常雜費", "文具/清潔", "的士速遞"] : undefined} historyKey={`office_ref_${docType}`} value={reference} onChange={(event) => setReference(event.target.value)} className={`${input} ml-2 w-56`} /></label>
+          <label>備註<AutoSuggestInput theme="legacy" name="officeNotes" autoComplete="on" suggestions={["門市即時點收", "供應商直送", "已核對裝箱單", "經理批核", "客戶退換"]} historyKey="office_notes" value={notes} onChange={(event) => setNotes(event.target.value)} className={`${input} ml-2 w-48`} /></label>
           <span className="ml-auto font-mono text-[16px]">總計 {formatHkd(total)}</span>
         </div>
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_330px]">
@@ -143,9 +192,9 @@ export function OfficeTxnPanel({ initialType, products, onSearch, onClose }: { i
             {lines.length === 0 ? <div className="p-10 text-center text-[12px] text-[#666]">由右方貨品清單加入項目</div> : null}
           </div>
           <div className="flex min-h-0 flex-col border-l border-[#aca899] bg-white">
-            <div className="border-b border-[#aca899] bg-[#e8eef5] p-2 text-[12px] text-black"><input value={query} onChange={(event) => { setQuery(event.target.value); void onSearch(event.target.value); }} className={`${input} w-full`} placeholder="搜尋條碼 / 貨品" /></div>
+            <div className="border-b border-[#aca899] bg-[#e8eef5] p-2 text-[12px] text-black"><AutoSuggestInput theme="legacy" name="officeProductSearch" autoComplete="on" suggestKind="product" historyKey="office_prod_q" value={query} onChange={(event) => { setQuery(event.target.value); void onSearch(event.target.value); }} className={`${input} w-full`} placeholder="搜尋條碼 / 貨品" /></div>
             <div className="min-h-0 flex-1 overflow-auto">{products.map((product) => <button key={product.sku} type="button" onClick={() => addProduct(product)} className="flex w-full justify-between gap-2 border-b border-[#e0e0e0] px-2 py-1 text-left text-[11px] text-black hover:bg-[#316ac5] hover:text-white"><span className="font-mono">{product.sku}</span><span className="flex-1 truncate">{product.nameZh || product.nameEn}</span><span>{formatHkd(product.unitPriceHkd)}</span></button>)}</div>
-            <div className="border-t border-[#aca899] bg-[#f0f0f0] p-2 text-[11px] text-black"><div className="mb-1 font-bold">人手入行</div><div className="grid grid-cols-2 gap-1"><input value={manual.sku} onChange={(event) => setManual((current) => ({ ...current, sku: event.target.value }))} className={input} placeholder="條碼 / 編號" /><input value={manual.name} onChange={(event) => setManual((current) => ({ ...current, name: event.target.value }))} className={input} placeholder="說明" /><input type="number" value={manual.quantity} onChange={(event) => setManual((current) => ({ ...current, quantity: event.target.value }))} className={input} placeholder="數量" /><input type="number" value={manual.price} onChange={(event) => setManual((current) => ({ ...current, price: event.target.value }))} className={input} placeholder="單價" /></div><button type="button" onClick={addManual} className={`${button} mt-1 w-full`}>加入</button></div>
+            <div className="border-t border-[#aca899] bg-[#f0f0f0] p-2 text-[11px] text-black"><div className="mb-1 font-bold">人手入行</div><div className="grid grid-cols-2 gap-1"><AutoSuggestInput theme="legacy" name="officeManualSku" autoComplete="on" suggestKind="product" valueField="sku" suggestions={docType === "PETTY_PAYOUT" ? ["TAXI", "COURIER", "CLEANING", "SUPPLIES"] : undefined} historyKey="office_manual_sku" value={manual.sku} onChange={(event) => setManual((current) => ({ ...current, sku: event.target.value }))} onValueSelect={(val, item) => { if (item.fields?.sku) { setManual((cur) => ({ ...cur, sku: val, name: item.fields?.nameZh || item.fields?.nameEn || cur.name, price: item.fields?.price || cur.price })); } }} className={input} placeholder="條碼 / 編號" /><AutoSuggestInput theme="legacy" name="officeManualName" autoComplete="on" suggestKind="product" valueField="nameZh" suggestions={docType === "PETTY_PAYOUT" ? ["速遞費", "的士車資", "門市雜費", "清潔用品"] : undefined} historyKey="office_manual_name" value={manual.name} onChange={(event) => setManual((current) => ({ ...current, name: event.target.value }))} onValueSelect={(val, item) => { if (item.fields?.sku) { setManual((cur) => ({ ...cur, sku: item.fields?.sku || cur.sku, name: val, price: item.fields?.price || cur.price })); } }} className={input} placeholder="說明" /><input type="number" value={manual.quantity} onChange={(event) => setManual((current) => ({ ...current, quantity: event.target.value }))} className={input} placeholder="數量" /><input type="number" value={manual.price} onChange={(event) => setManual((current) => ({ ...current, price: event.target.value }))} className={input} placeholder="單價" /></div><button type="button" onClick={addManual} className={`${button} mt-1 w-full`}>加入</button></div>
           </div>
         </div>
         {message ? <div className={`bg-[#ffffe1] px-2 py-1 text-[12px] ${completedNo ? "text-[#0a7a2f]" : "text-[#c00000]"}`}>營運通訊息 - {completedNo ? "000" : "054"}：{message}</div> : null}

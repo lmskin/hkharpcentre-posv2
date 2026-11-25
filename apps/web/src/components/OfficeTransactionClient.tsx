@@ -26,7 +26,7 @@ export function OfficeTransactionClient() {
         initialType="GOODS_RECEIPT"
         products={products}
         onSearch={search}
-        onClose={() => router.push("/pos")}
+        onClose={() => router.push("/")}
       />
     </div>
   );

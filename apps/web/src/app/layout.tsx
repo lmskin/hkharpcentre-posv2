@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { getCurrentSession } from "@/lib/session";
+import { getCurrentSession, isAuthRequired } from "@/lib/session";
 import { TopNav } from "@/components/TopNav";
 import "./globals.css";
 
@@ -12,10 +12,11 @@ export const dynamic = "force-dynamic";
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const session = await getCurrentSession();
+  const authRequired = isAuthRequired();
   return (
     <html lang="en">
       <body className="min-h-screen antialiased">
-        <TopNav session={session} />
+        <TopNav session={session} authRequired={authRequired} />
         <main className="mx-auto max-w-7xl px-4 py-6">{children}</main>
       </body>
     </html>

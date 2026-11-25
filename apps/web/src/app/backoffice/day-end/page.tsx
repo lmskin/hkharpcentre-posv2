@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { formatHkd } from "@hkharp/domain/money";
 
 interface DayEndPreview {
@@ -17,6 +18,7 @@ const cell = "border-b border-[#d4d0c8] px-2 py-1";
 const button = "border border-[#7f9db9] bg-[#f0f0f0] px-5 py-1 text-[12px] text-black hover:bg-[#e5e1d5] disabled:cursor-not-allowed disabled:opacity-40";
 
 export default function DayEndBackOfficePage() {
+  const router = useRouter();
   const [date, setDate] = useState(() => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Hong_Kong" }).format(new Date()));
   const [preview, setPreview] = useState<DayEndPreview | null>(null);
   const [counted, setCounted] = useState<Record<string, string>>({});
@@ -34,9 +36,26 @@ export default function DayEndBackOfficePage() {
 
   useEffect(() => { setCounted({}); void loadPreview(date); }, [date]);
 
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "F1") {
+        e.preventDefault();
+        router.push("/");
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [router]);
+
   const closedBatch = preview?.recentBatches.find((batch) => batch.businessDate === date && batch.status === "closed");
   const expectedTotal = preview?.collectedByTender.reduce((sum, row) => sum + row.collectedAmountHkd, 0) ?? 0;
   const countedTotal = preview?.collectedByTender.reduce((sum, row) => sum + (counted[row.tenderCode] === undefined || counted[row.tenderCode] === "" ? row.collectedAmountHkd : Number(counted[row.tenderCode])), 0) ?? 0;
+  const cashRow = preview?.collectedByTender.find((r) => r.tenderCode === "CASH");
+  const cashSales = cashRow?.collectedAmountHkd ?? 0;
+  const cashOpen = preview?.openingFloatHkd ?? 0;
+  const expectedCash = cashOpen + cashSales;
+  const countedCash = counted.CASH === undefined || counted.CASH === "" ? expectedCash : Number(counted.CASH) + cashOpen;
+  const cashDiscrepancy = Number((countedCash - expectedCash).toFixed(2));
 
   async function closeShift() {
     if (!preview || closedBatch) return;
@@ -68,15 +87,35 @@ export default function DayEndBackOfficePage() {
 
   return (
     <div className="border border-[#808080] bg-[#f0f0f0] font-[Tahoma,'Microsoft_JhengHei',sans-serif] text-black shadow-[4px_4px_8px_rgba(0,0,0,0.25)]">
-      <div className="flex items-center border-b border-[#d4d0c8] px-2 py-1 text-[12px] font-bold"><span>日結 - DayendInput</span><span className="ml-auto font-normal">BatchHeader / DayendPad</span></div>
+      <div className="flex items-center border-b border-[#d4d0c8] px-2 py-1 text-[12px] font-bold">
+        <span>日結 - DayendInput</span>
+        <span className="ml-auto font-normal">BatchHeader / DayendPad</span>
+      </div>
       <div className="flex items-center gap-2 border-b border-[#aca899] p-2 text-[12px]">
         <label>營業日期<input type="date" value={date} onChange={(event) => setDate(event.target.value)} className="ml-2 border border-[#7f9db9] bg-white px-2 py-1" /></label>
         <button type="button" className={button} onClick={() => void loadPreview(date)}>重新計算</button>
         <button type="button" className={button} onClick={() => window.print()}>列印預覽</button>
-        <button type="button" disabled={!preview || Boolean(closedBatch) || busy} className={`${button} ml-auto bg-[#e1dfff]`} onClick={() => setConfirmClose(true)}>{closedBatch ? "已日結封存" : "完成日結"}</button>
+        <button type="button" disabled={!preview || Boolean(closedBatch) || busy} className={`${button} ml-auto bg-[#fff8dc]`} onClick={() => setConfirmClose(true)}>{closedBatch ? "已日結封存" : "完成日結"}</button>
+        <button type="button" className={`${button} bg-[#e1dfff]`} onClick={() => router.push("/")}>離開</button>
       </div>
       {message ? <div className="border-b border-[#aca899] bg-[#ffffe1] px-2 py-1 text-[12px] text-[#c00000]">營運通訊息 - 055：{message}</div> : null}
-      {preview ? <div className="grid grid-cols-4 gap-px border-b border-[#aca899] bg-[#aca899]"><div className="bg-white p-3"><div className="text-[11px]">開櫃銀頭</div><div className="mt-1 font-mono text-[20px]">{formatHkd(preview.openingFloatHkd ?? 0)}</div></div><div className="bg-white p-3"><div className="text-[11px]">已開單據 ({preview.billCount})</div><div className="mt-1 font-mono text-[20px]">{formatHkd(preview.issuedSalesTotalHkd)}</div></div><div className="bg-white p-3"><div className="text-[11px]">未收發票餘額</div><div className="mt-1 font-mono text-[20px] text-[#9c6500]">{formatHkd(preview.unpaidIssuedBalanceHkd)}</div></div><div className="bg-white p-3"><div className="text-[11px]">已收款項</div><div className="mt-1 font-mono text-[20px] text-[#0a7a2f]">{formatHkd(expectedTotal)}</div></div></div> : null}
+      {preview ? (
+        <>
+          <div className="grid grid-cols-4 gap-px border-b border-[#aca899] bg-[#aca899]">
+            <div className="bg-white p-3"><div className="text-[11px]">開櫃銀頭</div><div className="mt-1 font-mono text-[20px]">{formatHkd(preview.openingFloatHkd ?? 0)}</div></div>
+            <div className="bg-white p-3"><div className="text-[11px]">已開單據 ({preview.billCount})</div><div className="mt-1 font-mono text-[20px]">{formatHkd(preview.issuedSalesTotalHkd)}</div></div>
+            <div className="bg-white p-3"><div className="text-[11px]">未收發票餘額</div><div className="mt-1 font-mono text-[20px] text-[#9c6500]">{formatHkd(preview.unpaidIssuedBalanceHkd)}</div></div>
+            <div className="bg-white p-3"><div className="text-[11px]">已收款項</div><div className="mt-1 font-mono text-[20px] text-[#0a7a2f]">{formatHkd(expectedTotal)}</div></div>
+          </div>
+          <div className="grid grid-cols-5 gap-px border-b border-[#aca899] bg-[#aca899] text-[11px]">
+            <div className="bg-[#f8f9fb] px-3 py-1.5"><span>銀頭 Cash Open：</span><span className="font-mono font-bold">{formatHkd(cashOpen)}</span></div>
+            <div className="bg-[#f8f9fb] px-3 py-1.5"><span>現金銷售 Cash Sales：</span><span className="font-mono font-bold">{formatHkd(cashSales)}</span></div>
+            <div className="bg-[#f8f9fb] px-3 py-1.5"><span>機數 Expected Cash：</span><span className="font-mono font-bold">{formatHkd(expectedCash)}</span></div>
+            <div className="bg-[#f8f9fb] px-3 py-1.5"><span>實點金額 Counted：</span><span className="font-mono font-bold">{formatHkd(countedCash)}</span></div>
+            <div className="bg-[#f8f9fb] px-3 py-1.5"><span>誤差 Discrepancy：</span><span className={`font-mono font-bold ${cashDiscrepancy === 0 ? "text-[#0a7a2f]" : "text-[#c00000]"}`}>{formatHkd(cashDiscrepancy)}</span></div>
+          </div>
+        </>
+      ) : null}
       <div className="grid min-h-[390px] grid-cols-[minmax(0,1fr)_360px]">
         <div className="overflow-auto bg-white">
           <div className="border-b border-[#aca899] bg-[#e8eef5] px-2 py-1 text-[12px] font-bold">DayendPad · 付款方式點算</div>
@@ -88,8 +127,11 @@ export default function DayEndBackOfficePage() {
           <table className="w-full border-collapse text-[11px]"><thead><tr className="text-left"><th className={`${cell} font-normal`}>日期</th><th className={`${cell} font-normal`}>批次</th><th className={`${cell} font-normal`}>狀態</th><th className={`${cell} text-right font-normal`}>收款</th></tr></thead><tbody>{preview?.recentBatches.map((batch) => <tr key={batch.id} className={batch.businessDate === date ? "bg-[#ffffe1]" : ""}><td className={`${cell} font-mono`}>{batch.businessDate}</td><td className={cell}>#{batch.batchNo}</td><td className={cell}>{batch.status === "closed" ? "已封存" : batch.status}</td><td className={`${cell} text-right font-mono`}>{formatHkd(batch.collectedPaymentsTotalHkd)}</td></tr>)}</tbody></table>
         </div>
       </div>
-      <div className="border-t border-[#aca899] px-2 py-1 text-[11px] text-[#666]">完成後，當日已完成單據會變為「已封存」，新交易及取消單會被拒絕。</div>
-      {confirmClose ? <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/20" role="alertdialog" aria-modal="true"><div className="w-[450px] border border-[#808080] bg-[#f0f0f0] p-4 shadow-xl"><div className="text-[13px] font-bold text-[#2e7ec2]">營運通訊息 - 056</div><div className="mt-2 text-[13px]">確定完成 {date} 日結？完成後當日單據將會封存。</div><div className="mt-2 bg-white p-2 font-mono text-[12px]">應收 {formatHkd(expectedTotal)} · 實點 {formatHkd(countedTotal)} · 差額 {formatHkd(countedTotal - expectedTotal)}</div><label className="mt-3 block text-[12px]">經理覆核密碼 (6位 PIN，非 L4+ 時填寫)<input type="password" inputMode="numeric" maxLength={6} value={managerPin} onChange={(e) => setManagerPin(e.target.value.replace(/\D/g, ""))} placeholder="L4+ 免填" className="mt-1 w-full border border-[#7f9db9] bg-white px-2 py-1 font-mono" /></label><div className="mt-4 flex justify-end gap-2"><button type="button" disabled={busy} className={button} onClick={() => void closeShift()}>{busy ? "處理中…" : "確定日結"}</button><button type="button" autoFocus className={`${button} bg-[#e1dfff]`} onClick={() => setConfirmClose(false)}>離開</button></div></div></div> : null}
+      <div className="flex flex-wrap items-center justify-between gap-4 border-t border-[#aca899] px-2 py-1.5 text-[11px] text-[#333]">
+        <span>完成後，當日已完成單據會變為「已封存」，新交易及取消單會被拒絕（F1 離開）。</span>
+        <span className="font-mono">收銀員簽署 : ____________________　　店主管核實 : ____________________</span>
+      </div>
+      {confirmClose ? <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/20" role="alertdialog" aria-modal="true"><div className="w-[450px] border border-[#808080] bg-[#f0f0f0] p-4 shadow-xl"><div className="text-[13px] font-bold text-[#2e7ec2]">營運通訊息 - 056</div><div className="mt-2 text-[13px]">確定完成 {date} 日結？完成後當日單據將會封存。</div><div className="mt-2 bg-white p-2 font-mono text-[12px]">應收 {formatHkd(expectedTotal)} · 實點 {formatHkd(countedTotal)} · 差額 {formatHkd(countedTotal - expectedTotal)}</div><label className="mt-3 block text-[12px]">經理覆核密碼 (6位 PIN，非 L4+ 時填寫)<input name="managerPin" autoComplete="one-time-code" type="password" inputMode="numeric" maxLength={6} value={managerPin} onChange={(e) => setManagerPin(e.target.value.replace(/\D/g, ""))} placeholder="L4+ 免填" className="mt-1 w-full border border-[#7f9db9] bg-white px-2 py-1 font-mono" /></label><div className="mt-4 flex justify-end gap-2"><button type="button" disabled={busy} className={button} onClick={() => void closeShift()}>{busy ? "處理中…" : "確定日結"}</button><button type="button" autoFocus className={`${button} bg-[#e1dfff]`} onClick={() => setConfirmClose(false)}>離開</button></div></div></div> : null}
     </div>
   );
 }

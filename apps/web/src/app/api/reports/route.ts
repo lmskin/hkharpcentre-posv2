@@ -7,6 +7,7 @@ import {
   getHistoricalSalesReport,
   getHourlySalesReport,
   getItemSalesReport,
+  getLegacyStatsReport,
   getManagerStatsReport,
   getOperationalReports,
   getOtherTransactionsReport,
@@ -189,6 +190,28 @@ export async function GET(request: Request) {
 
   if (view === "stats") {
     return NextResponse.json(await getManagerStatsReport({ fromDate, toDate, shopId }));
+  }
+
+  if (view === "legacy_stats") {
+    const rawKind = sp.get("kind");
+    const kind = rawKind === "member" || rawKind === "staff" ? rawKind : "sales";
+    const rawMatch = sp.get("matchMode");
+    const matchMode = rawMatch === "prefix" || rawMatch === "suffix" ? rawMatch : "contains";
+    const rawSort = sp.get("sortBy");
+    const sortBy =
+      rawSort === "qty_desc" || rawSort === "sales_desc" || rawSort === "sales_asc" ? rawSort : "default";
+    return NextResponse.json(
+      await getLegacyStatsReport({
+        kind,
+        fromDate,
+        toDate,
+        shopId,
+        q: sp.get("q") ?? undefined,
+        matchMode,
+        categoryC1: optInt(sp.get("categoryC1")),
+        sortBy,
+      }),
+    );
   }
 
   const report = await getOperationalReports({ fromDate, toDate, shopId });

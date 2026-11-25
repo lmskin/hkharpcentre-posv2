@@ -28,8 +28,8 @@ function setCors(req: IncomingMessage, res: ServerResponse) {
   if (
     origin === "http://127.0.0.1:3100" ||
     origin === "http://localhost:3100" ||
-    origin === "http://127.0.0.1:3000" ||
-    origin === "http://localhost:3000"
+    origin === "http://127.0.0.1:3501" ||
+    origin === "http://localhost:3501"
   ) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }

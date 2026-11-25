@@ -101,7 +101,7 @@ export function LegacyPrintBanner({
           HONG KONG HARP CENTRE · 店舖: {shopLabel}
           {legacyCode ? <span className="ml-2 font-mono font-normal text-[#666]">[{legacyCode}]</span> : null}
         </div>
-        <div className="font-mono text-[#333]">編印 Printed: {printedAt}</div>
+        <div suppressHydrationWarning className="font-mono text-[#333]">編印 Printed: {printedAt}</div>
       </div>
       <div className="mt-1 flex flex-wrap items-baseline justify-between gap-2">
         <div className="text-[14px] font-bold tracking-wide text-black">{reportTitle}</div>
@@ -245,7 +245,15 @@ export function ReportShell({
   }
 
   return (
-    <div className="absolute inset-0 z-20 bg-black/10 p-3" role="dialog" aria-modal="true" aria-label={title}>
+    <div
+      className="absolute inset-0 z-20 bg-black/10 p-3"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") e.preventDefault();
+      }}
+    >
       {frame}
     </div>
   );

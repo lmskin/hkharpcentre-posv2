@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { AutoSuggestInput } from "@/components/AutoSuggestInput";
 import type { BillDocType, TenderCode } from "@hkharp/contracts";
 import type { SessionPayload } from "@hkharp/db";
 import { calculateBillTotals } from "@hkharp/domain/bill-math";
@@ -15,6 +16,13 @@ export interface PosProduct {
   ubc?: string;
   nameZh: string;
   nameEn: string;
+  colorName?: string;
+  sizeName?: string;
+  buttonLabelZh?: string;
+  buttonLabelEn?: string;
+  ft?: number;
+  bli?: number;
+  colorHex?: string | null;
   categoryLabel?: string;
   categoryC1: number;
   unitPriceHkd: number;
@@ -41,6 +49,8 @@ export interface PosCustomer {
   nameZh: string;
   nameEn: string;
   phone: string;
+  email?: string;
+  address?: string;
   pointsBalance: number;
 }
 
@@ -368,8 +378,13 @@ export function PosRegisterClient({
             <h1 className="text-sm font-semibold uppercase tracking-wide text-slate-600">
               Catalog &amp; V47 Menu Groups
             </h1>
-            <input
+            <AutoSuggestInput
+              theme="modern"
               type="search"
+              name="regProductQuery"
+              autoComplete="on"
+              suggestKind="product"
+              historyKey="reg_prod_q"
               value={productQuery}
               onChange={(e) => void runProductSearch(e.target.value)}
               placeholder="Search 1,983 SKUs by code, English, or Chinese name..."
@@ -434,7 +449,13 @@ export function PosRegisterClient({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-slate-800">Member &amp; Cart Lines</h2>
             <div className="flex items-center gap-2 text-xs">
-              <input
+              <AutoSuggestInput
+                theme="modern"
+                name="regCustomerQuery"
+                autoComplete="on"
+                suggestKind="customer"
+                valueField="nameEn"
+                historyKey="reg_cust_q"
                 value={customerQuery}
                 onChange={(e) => void runCustomerSearch(e.target.value)}
                 placeholder="Filter 2,302 customers..."
@@ -608,7 +629,12 @@ export function PosRegisterClient({
                 )}
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <input
+                <AutoSuggestInput
+                  theme="modern"
+                  name="regOctopusCardId"
+                  autoComplete="on"
+                  suggestions={["88419204", "88001234", "91234567"]}
+                  historyKey="reg_octo_card"
                   value={octopusCardIdInput}
                   onChange={(e) => setOctopusCardIdInput(e.target.value)}
                   className="w-28 rounded border border-slate-300 bg-white px-2 py-1 font-mono"
@@ -670,7 +696,12 @@ export function PosRegisterClient({
             <div className="mt-3 grid grid-cols-2 gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs">
               <div>
                 <label className="block text-slate-600">Approval Code</label>
-                <input
+                <AutoSuggestInput
+                  theme="modern"
+                  name="regApprovalCode"
+                  autoComplete="on"
+                  suggestKind="payment_ref"
+                  historyKey="reg_approval_code"
                   value={approvalCode}
                   onChange={(e) => setApprovalCode(e.target.value)}
                   placeholder="Optional"
@@ -679,7 +710,11 @@ export function PosRegisterClient({
               </div>
               <div>
                 <label className="block text-slate-600">Card Last 4</label>
-                <input
+                <AutoSuggestInput
+                  theme="modern"
+                  name="regCardLast4"
+                  autoComplete="cc-number"
+                  historyKey="reg_card_last4"
                   value={cardLast4}
                   maxLength={4}
                   onChange={(e) => setCardLast4(e.target.value.replace(/\D/g, ""))}
@@ -708,7 +743,12 @@ export function PosRegisterClient({
             </div>
           ) : null}
 
-          <input
+          <AutoSuggestInput
+            theme="modern"
+            name="regBillNotes"
+            autoComplete="on"
+            suggestions={["送貨安排", "銀行轉帳跟進", "VIP折扣單", "分期付訂"]}
+            historyKey="reg_bill_notes"
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             placeholder="Invoice / bill remarks (optional)"

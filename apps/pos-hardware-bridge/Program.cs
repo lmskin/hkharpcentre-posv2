@@ -10,7 +10,7 @@ var listenUrl = builder.Configuration["HardwareBridge:ListenUrl"] ?? "http://127
 builder.WebHost.UseUrls(listenUrl);
 
 var allowedOriginsRaw = builder.Configuration["HardwareBridge:AllowedOrigins"]
-    ?? "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3100,http://127.0.0.1:3100";
+    ?? "http://localhost:3501,http://127.0.0.1:3501,http://localhost:3100,http://127.0.0.1:3100";
 var allowedOrigins = allowedOriginsRaw
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 

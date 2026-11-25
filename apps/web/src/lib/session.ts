@@ -1,10 +1,30 @@
 import { cookies } from "next/headers";
-import { SESSION_COOKIE_NAME, verifySessionToken, type SessionPayload } from "@hkharp/db";
+import {
+  resolveDefaultDevSession,
+  SESSION_COOKIE_NAME,
+  verifySessionToken,
+  type SessionPayload,
+} from "@hkharp/db";
+
+/**
+ * Login is disabled by default while this is a development website.
+ * Set AUTH_REQUIRED=true (or NEXT_PUBLIC_AUTH_REQUIRED=true) to enforce staff sign-in.
+ */
+export function isAuthRequired(): boolean {
+  return process.env.AUTH_REQUIRED === "true" || process.env.NEXT_PUBLIC_AUTH_REQUIRED === "true";
+}
 
 export async function getCurrentSession(): Promise<SessionPayload | null> {
   const store = await cookies();
   const token = store.get(SESSION_COOKIE_NAME)?.value;
-  return verifySessionToken(token);
+  const cookieSession = verifySessionToken(token);
+  if (cookieSession) {
+    return cookieSession;
+  }
+  if (!isAuthRequired()) {
+    return resolveDefaultDevSession();
+  }
+  return null;
 }
 
 export async function requireAuthenticatedSession(minRoleLevel = 1): Promise<

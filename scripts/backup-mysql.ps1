@@ -27,6 +27,7 @@ $arcFile = "$sqlFile.7z"
 $env:MYSQL_PWD = $pass
 try {
     & $mysqldump --single-transaction --routines --triggers --no-tablespaces `
+        --compression-algorithms=zlib,zstd,uncompressed --set-gtid-purged=OFF `
         --default-character-set=utf8mb4 `
         -h $uri.Host -P $uri.Port -u $user $db --result-file="$sqlFile"
     if ($LASTEXITCODE -ne 0) { throw "mysqldump exited with code $LASTEXITCODE" }

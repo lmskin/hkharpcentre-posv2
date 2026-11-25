@@ -94,6 +94,8 @@ export const billLines = mysqlTable(
     lineTotal: decimal("line_total", { precision: 18, scale: 4 }).notNull(),
     cancelled: boolean("cancelled").notNull().default(false),
     isModifier: boolean("is_modifier").notNull().default(false),
+    notes: varchar("notes", { length: 300 }).notNull().default(""),
+    serialNo: varchar("serial_no", { length: 80 }).notNull().default(""),
   },
   (t) => [
     uniqueIndex("uq_bill_lines_bill_lineno").on(t.billId, t.lineNo),

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { AutoSuggestInput } from "@/components/AutoSuggestInput";
 
 interface CustomerRow {
   id: number;
@@ -12,6 +13,7 @@ interface CustomerRow {
   nameEn: string;
   phone: string;
   email: string;
+  address?: string;
   pointsBalance: number;
 }
 
@@ -49,6 +51,7 @@ export default function CustomersBackOfficePage() {
   const [nameEn, setNameEn] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
+  const [address, setAddress] = useState("");
   const [ledger, setLedger] = useState<PointLedgerRow[]>([]);
   const [msg, setMsg] = useState("");
 
@@ -87,6 +90,7 @@ export default function CustomersBackOfficePage() {
     setNameEn(c.nameEn);
     setPhone(c.phone);
     setEmail(c.email);
+    setAddress(c.address ?? "");
     const res = await fetch(`/api/customers?customerId=${c.id}`);
     if (res.ok) {
       const data = (await res.json()) as { ledger: PointLedgerRow[] };
@@ -103,6 +107,7 @@ export default function CustomersBackOfficePage() {
     setNameEn("");
     setPhone("");
     setEmail("");
+    setAddress("");
     setLedger([]);
   }
 
@@ -121,6 +126,7 @@ export default function CustomersBackOfficePage() {
         nameEn,
         phone,
         email,
+        address,
       }),
     });
     const data = (await res.json()) as { legacyId?: string; error?: string };
@@ -143,8 +149,13 @@ export default function CustomersBackOfficePage() {
               Total {total.toLocaleString()} members · Page {loadedPage}/{pageCount}
             </div>
           </div>
-          <input
+          <AutoSuggestInput
+            theme="modern"
             type="search"
+            name="customerSearch"
+            autoComplete="on"
+            suggestKind="customer"
+            historyKey="bo_cust_search"
             value={q}
             onChange={(e) => {
               setQ(e.target.value);
@@ -236,7 +247,14 @@ export default function CustomersBackOfficePage() {
             </div>
             <div>
               <label className="block font-medium text-slate-600">Member Card No.</label>
-              <input
+              <AutoSuggestInput
+                theme="modern"
+                name="customerCardNo"
+                autoComplete="on"
+                suggestKind="customer"
+                valueField="cardNo"
+                suggestions={["RWC-", "VIP-", "HC-"]}
+                historyKey="bo_cust_card"
                 value={cardNo}
                 onChange={(e) => setCardNo(e.target.value)}
                 placeholder="e.g. RWC-0001"
@@ -246,7 +264,13 @@ export default function CustomersBackOfficePage() {
           </div>
           <div>
             <label className="block font-medium text-slate-600">Chinese Name</label>
-            <input
+            <AutoSuggestInput
+              theme="modern"
+              name="customerNameZh"
+              autoComplete="name"
+              suggestKind="customer"
+              valueField="nameZh"
+              historyKey="bo_cust_namezh"
               value={nameZh}
               onChange={(e) => setNameZh(e.target.value)}
               className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
@@ -255,7 +279,13 @@ export default function CustomersBackOfficePage() {
           </div>
           <div>
             <label className="block font-medium text-slate-600">English Name</label>
-            <input
+            <AutoSuggestInput
+              theme="modern"
+              name="customerNameEn"
+              autoComplete="name"
+              suggestKind="customer"
+              valueField="nameEn"
+              historyKey="bo_cust_nameen"
               value={nameEn}
               onChange={(e) => setNameEn(e.target.value)}
               className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
@@ -263,7 +293,14 @@ export default function CustomersBackOfficePage() {
           </div>
           <div>
             <label className="block font-medium text-slate-600">Phone</label>
-            <input
+            <AutoSuggestInput
+              theme="modern"
+              type="tel"
+              name="customerPhone"
+              autoComplete="tel"
+              suggestKind="customer"
+              valueField="phone"
+              historyKey="bo_cust_phone"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
               className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
@@ -271,9 +308,28 @@ export default function CustomersBackOfficePage() {
           </div>
           <div>
             <label className="block font-medium text-slate-600">Email</label>
-            <input
+            <AutoSuggestInput
+              theme="modern"
+              type="email"
+              name="customerEmail"
+              autoComplete="email"
+              emailDomainSuggest
+              suggestKind="customer"
+              valueField="email"
+              historyKey="bo_cust_email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
+            />
+          </div>
+          <div>
+            <label className="block font-medium text-slate-600">Address (送貨地址)</label>
+            <textarea
+              name="customerAddress"
+              rows={2}
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+              placeholder="Delivery / sign-off address..."
               className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
             />
           </div>

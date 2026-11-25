@@ -18,18 +18,22 @@ try {
     & npm.cmd run db:migrate
     if ($LASTEXITCODE -ne 0) { throw "db:migrate failed (exit $LASTEXITCODE)" }
 
-    Write-Output "[3/6] Stopping HKHarpPOS task and releasing TCP port 3000..."
+    Write-Output "[3/6] Stopping HKHarpPOS task and releasing TCP port 3501..."
     cmd.exe /c 'schtasks /end /tn "HKHarpPOS" >nul 2>&1'
     Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match 'start-pos\.cmd' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue |
+    # Retire any legacy hkharpcentre-posv2 next start listener (e.g. old :3000) matching our repo
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'next start -p 3000' -and $_.CommandLine -match '--env-file=\.\./\.\./\.env' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Get-NetTCPConnection -LocalPort 3501 -State Listen -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty OwningProcess -Unique |
         ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
 
     $released = $false
     for ($i = 0; $i -lt 20; $i++) {
-        $listeners = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
+        $listeners = Get-NetTCPConnection -LocalPort 3501 -State Listen -ErrorAction SilentlyContinue
         if (-not $listeners) {
             $released = $true
             break
@@ -37,7 +41,7 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not $released) {
-        throw "TCP port 3000 is still occupied after stopping HKHarpPOS"
+        throw "TCP port 3501 is still occupied after stopping HKHarpPOS"
     }
 
     Write-Output "[4/6] Building Next.js production bundle & checking worker..."
@@ -48,12 +52,12 @@ try {
     & schtasks.exe /run /tn "HKHarpPOS"
     if ($LASTEXITCODE -ne 0) { throw "Failed to start HKHarpPOS scheduled task (exit $LASTEXITCODE)" }
 
-    Write-Output "[6/6] Waiting for http://localhost:3000/api/health..."
+    Write-Output "[6/6] Waiting for http://127.0.0.1:3501/api/health..."
     $healthy = $false
     $healthBody = $null
     for ($i = 0; $i -lt 60; $i++) {
         try {
-            $res = Invoke-RestMethod -Uri 'http://127.0.0.1:3000/api/health' -TimeoutSec 2
+            $res = Invoke-RestMethod -Uri 'http://127.0.0.1:3501/api/health' -TimeoutSec 10
             if ($res.ok -eq $true -and $res.mysql.connected -eq $true -and $res.mysql.tableCount -eq 37) {
                 $healthy = $true
                 $healthBody = $res
@@ -65,14 +69,14 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not $healthy) {
-        throw "Production server failed health check on http://localhost:3000/api/health within 30s"
+        throw "Production server failed health check on http://127.0.0.1:3501/api/health within 30s"
     }
 
     $activePids = @(
-        Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue |
+        Get-NetTCPConnection -LocalPort 3501 -State Listen -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty OwningProcess -Unique
     )
-    Write-Output "Deploy OK: listening PID(s)=$($activePids -join ',') tableCount=$($healthBody.mysql.tableCount) products=$($healthBody.mysql.productCount) bills=$($healthBody.mysql.billCount)"
+    Write-Output "Deploy OK: port=3501 listening PID(s)=$($activePids -join ',') tableCount=$($healthBody.mysql.tableCount) products=$($healthBody.mysql.productCount) bills=$($healthBody.mysql.billCount)"
 }
 finally {
     Pop-Location

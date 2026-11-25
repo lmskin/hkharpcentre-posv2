@@ -5,8 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import type { SessionPayload } from "@hkharp/db";
 
 const NAV_LINKS = [
-  { href: "/", label: "Overview" },
-  { href: "/pos", label: "POS" },
+  { href: "/", label: "POS" },
   { href: "/invoices", label: "Invoices & AR" },
   { href: "/backoffice/products", label: "Products" },
   { href: "/backoffice/customers", label: "Customers" },
@@ -18,13 +17,13 @@ const NAV_LINKS = [
   { href: "/backoffice/settings", label: "Settings" },
 ];
 
-export function TopNav({ session }: { session: SessionPayload | null }) {
+export function TopNav({ session, authRequired = false }: { session: SessionPayload | null; authRequired?: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
 
   async function handleLogout() {
     await fetch("/api/auth/logout", { method: "POST" });
-    router.push("/login");
+    router.push(authRequired ? "/login" : "/");
     router.refresh();
   }
 
@@ -36,7 +35,7 @@ export function TopNav({ session }: { session: SessionPayload | null }) {
         </Link>
         <nav className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-slate-700">
           {NAV_LINKS.map((item) => {
-            const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+            const active = item.href === "/" ? pathname === "/" || pathname.startsWith("/pos") : pathname.startsWith(item.href);
             return (
               <Link
                 key={item.href}
@@ -54,24 +53,26 @@ export function TopNav({ session }: { session: SessionPayload | null }) {
           {session ? (
             <>
               <span className="rounded-full bg-emerald-50 px-2.5 py-1 font-medium text-emerald-800">
-                {session.displayName} (L{session.roleLevel})
+                {session.displayName} (L{session.roleLevel}{authRequired ? "" : " · Dev"})
               </span>
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="rounded border border-slate-300 px-2 py-1 text-slate-700 hover:bg-slate-50"
-              >
-                Sign out
-              </button>
+              {authRequired ? (
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="rounded border border-slate-300 px-2 py-1 text-slate-700 hover:bg-slate-50"
+                >
+                  Sign out
+                </button>
+              ) : null}
             </>
-          ) : (
+          ) : authRequired ? (
             <Link
               href="/login"
               className="rounded-md bg-indigo-600 px-3 py-1.5 font-semibold text-white hover:bg-indigo-700"
             >
               Staff Sign In
             </Link>
-          )}
+          ) : null}
         </div>
       </div>
     </header>

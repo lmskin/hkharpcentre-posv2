@@ -111,6 +111,8 @@ export interface CreateBillOrInvoiceTxInput {
     discountRate?: number;
     lineDiscountAmountHkd?: number;
     excludeFromCrmBonus?: boolean;
+    notes?: string;
+    serialNo?: string;
   }>;
   initialPayments: RecordPaymentInput[];
   notes?: string;
@@ -316,6 +318,8 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
           lineTotal: lineCalc.netHkd.toFixed(4),
           cancelled: false,
           isModifier: false,
+          notes: (l.notes ?? "").trim().slice(0, 300),
+          serialNo: (l.serialNo ?? "").trim().slice(0, 80),
         };
       }),
     );

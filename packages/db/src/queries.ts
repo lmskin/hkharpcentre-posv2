@@ -1,14 +1,22 @@
-import { and, desc, eq, inArray, like, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, like, ne, or, sql } from "drizzle-orm";
 import type mysql from "mysql2/promise";
 import { createDb, type HarpDb } from "./client";
-import { verifySecret } from "./auth";
+import { verifySecret, type SessionPayload } from "./auth";
 import { auditLogs, shops, staff, staffRoles, terminals } from "./schema/org-auth";
 import { categories, posMenuButtons, posMenus, products, units } from "./schema/catalog";
 import { crmPointLedger, customerGrades, customers, memberCards, suppliers } from "./schema/crm";
 import { billLines, bills, deliveryOrders } from "./schema/sales-ar";
-import { billPayments } from "./schema/payments";
+import { billPayments, payMethods } from "./schema/payments";
 import { appSettings, dayEndBatches, stockBalances, stockMovements } from "./schema/stock-ops";
 import { formatHktBusinessDate } from "./transactions";
+
+export type QueryMatchMode = "prefix" | "contains" | "suffix";
+
+function buildLikePattern(q: string, matchMode: QueryMatchMode = "contains"): string {
+  if (matchMode === "prefix") return `${q}%`;
+  if (matchMode === "suffix") return `%${q}`;
+  return `%${q}%`;
+}
 
 const SALES_DOC_TYPES = ["RETAIL_SALE", "SALES_INVOICE", "SALES_RETURN"] as const;
 
@@ -199,6 +207,74 @@ export async function authenticateStaff(params: {
   return null;
 }
 
+const DEV_SESSION_TTL_MS = 60_000;
+type BaseDevSession = Omit<SessionPayload, "exp">;
+let cachedDevSession: { value: BaseDevSession; expiresAt: number } | null = null;
+
+/**
+ * Resolves the default development POS session without requiring login.
+ * Prefers DEV_DEFAULT_STAFF_CODE (default "5002") and caches for 60s.
+ */
+export async function resolveDefaultDevSession(): Promise<SessionPayload> {
+  const now = Date.now();
+  const fallback: BaseDevSession = {
+    staffId: 1,
+    legacyId: process.env.DEV_DEFAULT_STAFF_CODE?.trim() || "5002",
+    displayName: "Morris",
+    roleLevel: 5,
+    shopId: 1,
+  };
+
+  if (cachedDevSession && cachedDevSession.expiresAt > now) {
+    return { ...cachedDevSession.value, exp: Math.floor(now / 1000) + 16 * 3600 };
+  }
+
+  let resolved: BaseDevSession = fallback;
+  try {
+    const conn = getSharedDb();
+    if (conn) {
+      const preferredCode = process.env.DEV_DEFAULT_STAFF_CODE?.trim() || "5002";
+      const rows = await conn.db
+        .select({
+          id: staff.id,
+          legacyId: staff.legacyId,
+          displayName: staff.displayName,
+          shopId: staff.shopId,
+          roleLevel: staffRoles.legacyAuthorityLevel,
+        })
+        .from(staff)
+        .innerJoin(staffRoles, eq(staff.roleId, staffRoles.id))
+        .where(eq(staff.active, true));
+
+      const chosen =
+        rows.find((r) => r.legacyId === preferredCode) ??
+        [...rows].sort((a, b) => b.roleLevel - a.roleLevel || a.id - b.id)[0];
+
+      if (chosen) {
+        const [staffShop] = await conn.db
+          .select({ legacySn: shops.legacySn })
+          .from(shops)
+          .where(eq(shops.id, chosen.shopId))
+          .limit(1);
+        const storeCtx = await resolveActiveStoreContext();
+        const resolvedShopId = staffShop?.legacySn === 0 ? storeCtx.shopId : chosen.shopId;
+        resolved = {
+          staffId: chosen.id,
+          legacyId: chosen.legacyId ?? String(chosen.id),
+          displayName: chosen.displayName,
+          roleLevel: chosen.roleLevel,
+          shopId: resolvedShopId,
+        };
+      }
+    }
+  } catch {
+    resolved = fallback;
+  }
+
+  cachedDevSession = { value: resolved, expiresAt: now + DEV_SESSION_TTL_MS };
+  return { ...resolved, exp: Math.floor(now / 1000) + 16 * 3600 };
+}
+
 export async function authorizeManagerOverride(managerPin: string, minRoleLevel = 4) {
   const clean = managerPin.trim();
   if (!clean) return null;
@@ -268,6 +344,8 @@ export async function listCatalogProducts(limit = 60) {
       ubc: products.ubc,
       nameZh: products.nameZh,
       nameEn: products.nameEn,
+      colorName: products.colorName,
+      sizeName: products.sizeName,
       categoryC1: products.legacyC1,
       categoryNameEn: categories.nameEn,
       sellPrice: products.sellPrice,
@@ -289,6 +367,8 @@ export async function listCatalogProducts(limit = 60) {
     ubc: r.ubc,
     nameZh: r.nameZh,
     nameEn: r.nameEn || r.nameZh,
+    colorName: r.colorName,
+    sizeName: r.sizeName,
     categoryLabel: `${r.categoryNameEn ?? "General"} (C1=${r.categoryC1})`,
     categoryC1: r.categoryC1,
     unitPriceHkd: Number(r.sellPrice),
@@ -316,6 +396,7 @@ export async function searchProducts(params: { q?: string; categoryC1?: number; 
         like(products.ubc, pattern),
         like(products.nameEn, pattern),
         like(products.nameZh, pattern),
+        like(products.colorName, pattern),
       ),
     );
   }
@@ -330,6 +411,8 @@ export async function searchProducts(params: { q?: string; categoryC1?: number; 
       ubc: products.ubc,
       nameZh: products.nameZh,
       nameEn: products.nameEn,
+      colorName: products.colorName,
+      sizeName: products.sizeName,
       categoryC1: products.legacyC1,
       categoryNameEn: categories.nameEn,
       sellPrice: products.sellPrice,
@@ -352,6 +435,8 @@ export async function searchProducts(params: { q?: string; categoryC1?: number; 
     ubc: r.ubc,
     nameZh: r.nameZh,
     nameEn: r.nameEn || r.nameZh,
+    colorName: r.colorName,
+    sizeName: r.sizeName,
     categoryLabel: `${r.categoryNameEn ?? "General"} (C1=${r.categoryC1})`,
     categoryC1: r.categoryC1,
     unitPriceHkd: Number(r.sellPrice),
@@ -376,6 +461,7 @@ export async function countProducts(params: { q?: string; categoryC1?: number })
         like(products.ubc, pattern),
         like(products.nameEn, pattern),
         like(products.nameZh, pattern),
+        like(products.colorName, pattern),
       ),
     );
   }
@@ -399,6 +485,8 @@ export async function findExactProductByCode(code: string) {
     ubc: products.ubc,
     nameZh: products.nameZh,
     nameEn: products.nameEn,
+    colorName: products.colorName,
+    sizeName: products.sizeName,
     categoryC1: products.legacyC1,
     sellPrice: products.sellPrice,
     fixedPrice: products.fixedPrice,
@@ -418,6 +506,8 @@ export async function findExactProductByCode(code: string) {
     ubc: r.ubc,
     nameZh: r.nameZh,
     nameEn: r.nameEn || r.nameZh,
+    colorName: r.colorName,
+    sizeName: r.sizeName,
     categoryC1: r.categoryC1,
     unitPriceHkd: Number(r.sellPrice),
     fixedPriceHkd: r.fixedPrice !== null ? Number(r.fixedPrice) : null,
@@ -442,6 +532,8 @@ export async function upsertProductRecord(input: {
   ubc?: string;
   nameZh: string;
   nameEn: string;
+  colorName?: string;
+  sizeName?: string;
   legacyC1: number;
   sellPriceHkd: number;
   fixedPriceHkd?: number | null;
@@ -461,6 +553,8 @@ export async function upsertProductRecord(input: {
         ubc: input.ubc !== undefined ? input.ubc : existing[0]!.ubc,
         nameZh: input.nameZh,
         nameEn: input.nameEn,
+        colorName: input.colorName !== undefined ? input.colorName : existing[0]!.colorName,
+        sizeName: input.sizeName !== undefined ? input.sizeName : existing[0]!.sizeName,
         legacyC1: input.legacyC1,
         categoryId: cat?.id ?? existing[0]!.categoryId,
         sellPrice: input.sellPriceHkd.toFixed(4),
@@ -484,6 +578,8 @@ export async function upsertProductRecord(input: {
     ubc: input.ubc ?? "",
     nameZh: input.nameZh,
     nameEn: input.nameEn,
+    colorName: input.colorName ?? "",
+    sizeName: input.sizeName ?? "",
     legacyC1: input.legacyC1,
     categoryId: cat?.id ?? null,
     sellPrice: input.sellPriceHkd.toFixed(4),
@@ -509,10 +605,13 @@ export async function listPosMenusWithButtons() {
       labelZh: posMenuButtons.labelZh,
       labelEn: posMenuButtons.labelEn,
       gridPosition: posMenuButtons.gridPosition,
+      colorHex: posMenuButtons.colorHex,
       sku: products.barcode,
       ubc: products.ubc,
       nameZh: products.nameZh,
       nameEn: products.nameEn,
+      colorName: products.colorName,
+      sizeName: products.sizeName,
       categoryC1: products.legacyC1,
       sellPrice: products.sellPrice,
       fixedPrice: products.fixedPrice,
@@ -523,40 +622,114 @@ export async function listPosMenusWithButtons() {
     .leftJoin(products, eq(posMenuButtons.productId, products.id))
     .orderBy(posMenuButtons.menuId, posMenuButtons.gridPosition);
 
-  const byMenu = new Map<number, typeof buttons>();
+  const byMenuSlot = new Map<number, Map<string, { sn: number; ft: number; bli: number; row: (typeof buttons)[number] }>>();
   for (const b of buttons) {
-    const arr = byMenu.get(b.menuId) ?? [];
-    arr.push(b);
-    byMenu.set(b.menuId, arr);
+    if (b.sku === null) continue;
+    const sn = Math.floor(b.gridPosition / 10000);
+    const ft = Math.floor((b.gridPosition % 10000) / 100);
+    const bli = b.gridPosition % 100;
+    const slotKey = `${ft}:${bli}`;
+    let slotMap = byMenuSlot.get(b.menuId);
+    if (!slotMap) {
+      slotMap = new Map();
+      byMenuSlot.set(b.menuId, slotMap);
+    }
+    const existing = slotMap.get(slotKey);
+    if (!existing || sn >= existing.sn) {
+      slotMap.set(slotKey, { sn, ft, bli, row: b });
+    }
   }
 
-  return menus.map((m) => ({
-    id: m.id,
-    code: m.code,
-    titleZh: m.titleZh,
-    titleEn: m.titleEn,
-    buttons: (byMenu.get(m.id) ?? [])
-      .filter((b) => b.sku !== null)
-      .map((b) => ({
+  return menus.map((m) => {
+    const entries = Array.from(byMenuSlot.get(m.id)?.values() ?? []).sort(
+      (a, b) => a.ft - b.ft || a.bli - b.bli,
+    );
+    return {
+      id: m.id,
+      code: m.code,
+      titleZh: m.titleZh,
+      titleEn: m.titleEn,
+      buttons: entries.map(({ ft, bli, row: b }) => ({
         sku: b.sku!,
         ubc: b.ubc ?? "",
         nameZh: b.nameZh ?? b.labelZh,
         nameEn: b.nameEn || b.labelEn,
+        colorName: b.colorName ?? "",
+        sizeName: b.sizeName ?? "",
+        buttonLabelZh: b.labelZh,
+        buttonLabelEn: b.labelEn,
+        ft,
+        bli,
+        colorHex: b.colorHex ?? null,
         categoryC1: b.categoryC1 ?? 0,
         unitPriceHkd: Number(b.sellPrice ?? 0),
         allowItemDiscount: b.allowItemDiscount ?? true,
         isFixedPrice: b.fixedPrice !== null,
         excludeFromCrmBonus: b.excludeFromCrmBonus ?? false,
       })),
-  }));
+    };
+  });
 }
 
-export async function searchCustomers(params: { q?: string; limit?: number; offset?: number }) {
+export type CustomerSearchField = "all" | "id" | "name" | "phone";
+export type CustomerSortBy = "newest_id" | "points";
+
+function buildCustomerSearchFilter(q?: string, searchField: CustomerSearchField = "all") {
+  const clean = q?.trim();
+  if (!clean) return undefined;
+  const pattern = `%${clean}%`;
+  if (searchField === "id") {
+    return or(
+      like(customers.legacyId, pattern),
+      sql`EXISTS (SELECT 1 FROM member_cards mc WHERE mc.customer_id = ${customers.id} AND mc.card_no LIKE ${pattern})`,
+    );
+  }
+  if (searchField === "name") {
+    return or(like(customers.nameZh, pattern), like(customers.nameEn, pattern));
+  }
+  if (searchField === "phone") {
+    return like(customers.phone, pattern);
+  }
+  return or(
+    like(customers.legacyId, pattern),
+    like(customers.nameZh, pattern),
+    like(customers.nameEn, pattern),
+    like(customers.phone, pattern),
+    like(customers.address, pattern),
+    sql`EXISTS (SELECT 1 FROM member_cards mc WHERE mc.customer_id = ${customers.id} AND mc.card_no LIKE ${pattern})`,
+  );
+}
+
+export async function getNextCustomerLegacyId(): Promise<string> {
   const conn = requireSharedDb();
-  const q = params.q?.trim();
+  const [rows] = await conn.pool.query(
+    "SELECT COALESCE(MAX(CAST(legacy_id AS UNSIGNED)), 0) + 1 AS next_id FROM customers WHERE legacy_id REGEXP '^[0-9]+$'",
+  );
+  const nextId = Array.isArray(rows) && rows[0] && "next_id" in rows[0] ? Number((rows[0] as { next_id: number }).next_id) : 1;
+  return String(Number.isFinite(nextId) && nextId > 0 ? nextId : 1);
+}
+
+export async function searchCustomers(params: {
+  q?: string;
+  searchField?: CustomerSearchField;
+  sortBy?: CustomerSortBy;
+  limit?: number;
+  offset?: number;
+}) {
+  const conn = requireSharedDb();
   const limit = Math.min(params.limit ?? 50, 200);
   const offset = Math.max(0, params.offset ?? 0);
-  const pattern = q ? `%${q}%` : undefined;
+  const filter = buildCustomerSearchFilter(params.q, params.searchField ?? "all");
+  const sortBy = params.sortBy ?? "newest_id";
+
+  const orderByCols =
+    sortBy === "points"
+      ? [desc(customers.pointsBalance), desc(customers.id)]
+      : [
+          sql`CASE WHEN ${customers.legacyId} REGEXP '^[0-9]+$' THEN 0 ELSE 1 END ASC`,
+          sql`CAST(${customers.legacyId} AS UNSIGNED) DESC`,
+          desc(customers.id),
+        ];
 
   const rows = await conn.db
     .select({
@@ -569,51 +742,33 @@ export async function searchCustomers(params: { q?: string; limit?: number; offs
       nameEn: customers.nameEn,
       phone: customers.phone,
       email: customers.email,
+      address: customers.address,
       pointsBalance: customers.pointsBalance,
       active: customers.active,
       cardNo: sql<string | null>`(SELECT mc.card_no FROM member_cards mc WHERE mc.customer_id = ${customers.id} AND mc.active = 1 ORDER BY mc.id LIMIT 1)`,
     })
     .from(customers)
     .leftJoin(customerGrades, eq(customers.gradeId, customerGrades.id))
-    .where(
-      pattern
-        ? or(
-            like(customers.legacyId, pattern),
-            like(customers.nameZh, pattern),
-            like(customers.nameEn, pattern),
-            like(customers.phone, pattern),
-            sql`EXISTS (SELECT 1 FROM member_cards mc WHERE mc.customer_id = ${customers.id} AND mc.card_no LIKE ${pattern})`,
-          )
-        : undefined,
-    )
-    .orderBy(desc(customers.pointsBalance), customers.id)
+    .where(filter)
+    .orderBy(...orderByCols)
     .limit(limit)
     .offset(offset);
 
   return rows.map((r) => ({
     ...r,
+    address: r.address ?? "",
     gradeName: r.gradeNameZh || r.gradeNameEn || "",
     cardNo: r.cardNo ?? "",
   }));
 }
 
-export async function countCustomers(q?: string) {
+export async function countCustomers(q?: string, searchField: CustomerSearchField = "all") {
   const conn = requireSharedDb();
-  const pattern = q?.trim() ? `%${q.trim()}%` : undefined;
+  const filter = buildCustomerSearchFilter(q, searchField);
   const [row] = await conn.db
     .select({ total: sql<number>`COUNT(*)` })
     .from(customers)
-    .where(
-      pattern
-        ? or(
-            like(customers.legacyId, pattern),
-            like(customers.nameZh, pattern),
-            like(customers.nameEn, pattern),
-            like(customers.phone, pattern),
-            sql`EXISTS (SELECT 1 FROM member_cards mc WHERE mc.customer_id = ${customers.id} AND mc.card_no LIKE ${pattern})`,
-          )
-        : undefined,
-    );
+    .where(filter);
   return Number(row?.total ?? 0);
 }
 
@@ -648,7 +803,17 @@ export async function listStaffPage(params: { q?: string; page?: number; pageSiz
     conn.db.select({ total: sql<number>`COUNT(*)` }).from(staff).where(filter),
   ]);
   const total = Number(countRows[0]?.total ?? 0);
-  return { items: rows, total, page, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)) };
+  return {
+    items: rows.map((r) => ({
+      ...r,
+      phone: "",
+      cardNo: "",
+    })),
+    total,
+    page,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(total / pageSize)),
+  };
 }
 
 async function syncCustomerCardNo(db: HarpDb, customerId: number, cardNo?: string) {
@@ -688,6 +853,7 @@ export async function upsertCustomerRecord(input: {
   nameEn?: string;
   phone?: string;
   email?: string;
+  address?: string;
 }) {
   const conn = requireSharedDb();
   if (input.id) {
@@ -701,13 +867,14 @@ export async function upsertCustomerRecord(input: {
           nameEn: input.nameEn ?? existingById[0]!.nameEn,
           phone: input.phone ?? existingById[0]!.phone,
           email: input.email ?? existingById[0]!.email,
+          address: input.address !== undefined ? input.address : existingById[0]!.address,
         })
         .where(eq(customers.id, existingById[0]!.id));
       await syncCustomerCardNo(conn.db, existingById[0]!.id, input.cardNo);
       return { ok: true, id: existingById[0]!.id, legacyId: existingById[0]!.legacyId };
     }
   }
-  const idKey = input.legacyId?.trim() || `CUST${Date.now().toString().slice(-8)}`;
+  const idKey = input.legacyId?.trim() || (await getNextCustomerLegacyId());
   const existing = await conn.db.select().from(customers).where(eq(customers.legacyId, idKey)).limit(1);
   if (existing.length > 0) {
     await conn.db
@@ -718,6 +885,7 @@ export async function upsertCustomerRecord(input: {
         nameEn: input.nameEn ?? existing[0]!.nameEn,
         phone: input.phone ?? existing[0]!.phone,
         email: input.email ?? existing[0]!.email,
+        address: input.address !== undefined ? input.address : existing[0]!.address,
       })
       .where(eq(customers.id, existing[0]!.id));
     await syncCustomerCardNo(conn.db, existing[0]!.id, input.cardNo);
@@ -730,6 +898,7 @@ export async function upsertCustomerRecord(input: {
     nameEn: input.nameEn ?? "",
     phone: input.phone ?? "",
     email: input.email ?? "",
+    address: input.address ?? "",
     pointsBalance: 0,
     active: true,
   });
@@ -915,7 +1084,85 @@ export async function listInvoices(params: {
 }
 
 export type BillQueryView = "today" | "held" | "office" | "unprocessed";
-export type BillQuerySubFilter = "all" | "last30" | "completed" | "cancelled" | "deposit";
+export type BillQuerySubFilter =
+  | "all"
+  | "last30"
+  | "completed"
+  | "cancelled"
+  | "deposit"
+  | "not_received"
+  | "received"
+  | "rejected"
+  | "problem";
+export type BillQuerySearchField =
+  | "all"
+  | "customer_id"
+  | "customer_name"
+  | "invoice_no"
+  | "ubc"
+  | "sku"
+  | "name"
+  | "search_code"
+  | "tender"
+  | "notes";
+
+function buildBillHeaderSearchFilter(q: string, searchField: BillQuerySearchField, matchMode: QueryMatchMode) {
+  const p = buildLikePattern(q, matchMode);
+  switch (searchField) {
+    case "customer_id":
+      return like(customers.legacyId, p);
+    case "customer_name":
+      return or(like(customers.nameZh, p), like(customers.nameEn, p))!;
+    case "invoice_no":
+      return like(bills.invoiceNo, p);
+    case "search_code":
+      return or(
+        like(bills.invoiceNo, p),
+        like(bills.legacySc, p),
+        like(customers.legacyId, p),
+        like(bills.notes, p),
+      )!;
+    case "sku":
+    case "ubc":
+    case "name":
+      return sql`EXISTS (
+        SELECT 1 FROM bill_lines bl_s
+        LEFT JOIN products p_s ON p_s.id = bl_s.product_id
+        WHERE bl_s.bill_id = ${bills.id}
+          AND (
+            bl_s.sku LIKE ${p}
+            OR COALESCE(p_s.ubc, '') LIKE ${p}
+            OR bl_s.name_zh LIKE ${p}
+            OR bl_s.name_en LIKE ${p}
+          )
+      )`;
+    case "tender":
+      return sql`EXISTS (
+        SELECT 1 FROM bill_payments bp_s
+        LEFT JOIN pay_methods pm_s ON pm_s.id = bp_s.pay_method_id
+        WHERE bp_s.bill_id = ${bills.id}
+          AND bp_s.voided = 0
+          AND (
+            bp_s.tender_code LIKE ${p}
+            OR COALESCE(pm_s.name_zh, '') LIKE ${p}
+            OR COALESCE(pm_s.name_en, '') LIKE ${p}
+            OR COALESCE(bp_s.remarks, '') LIKE ${p}
+          )
+      )`;
+    case "notes":
+      return like(bills.notes, p);
+    default:
+      return or(
+        like(bills.invoiceNo, p),
+        like(bills.legacySc, p),
+        like(bills.notes, p),
+        like(customers.legacyId, p),
+        like(customers.nameZh, p),
+        like(customers.nameEn, p),
+        like(customers.phone, p),
+      )!;
+  }
+}
 
 export async function listBillQuery(
   viewOrParams:
@@ -926,6 +1173,8 @@ export async function listBillQuery(
         q?: string;
         date?: string;
         subFilter?: BillQuerySubFilter;
+        searchField?: BillQuerySearchField;
+        matchMode?: QueryMatchMode;
       },
   shopIdArg?: number,
 ) {
@@ -936,6 +1185,8 @@ export async function listBillQuery(
   const q = typeof viewOrParams === "string" ? undefined : viewOrParams.q?.trim();
   const date = typeof viewOrParams === "string" ? undefined : viewOrParams.date?.trim();
   const subFilter = (typeof viewOrParams === "string" ? "all" : viewOrParams.subFilter) ?? "all";
+  const searchField = (typeof viewOrParams === "string" ? "all" : viewOrParams.searchField) ?? "all";
+  const matchMode = (typeof viewOrParams === "string" ? "contains" : viewOrParams.matchMode) ?? "contains";
   const retailTypes = ["RETAIL_SALE", "SALES_INVOICE", "SALES_RETURN"];
   const filters = [eq(bills.shopId, shopId)];
 
@@ -951,10 +1202,22 @@ export async function listBillQuery(
       sql`(${bills.docType} NOT IN ('RETAIL_SALE', 'SALES_INVOICE', 'SALES_RETURN') OR ${bills.sourceTable} = 'OfficeXHeader')`,
     );
   } else {
-    filters.push(
-      sql`${bills.status} <> 'cancelled'`,
-      sql`(${bills.status} IN ('open', 'held', 'intraday') OR ${bills.balanceDue} > 0 OR ${deliveryOrders.deliveryStatus} = 'pending')`,
-    );
+    filters.push(sql`${bills.status} <> 'cancelled'`);
+    if (subFilter === "received") {
+      filters.push(eq(deliveryOrders.deliveryStatus, "delivered"));
+    } else if (subFilter === "rejected") {
+      filters.push(eq(deliveryOrders.deliveryStatus, "rejected"));
+    } else if (subFilter === "problem") {
+      filters.push(eq(deliveryOrders.deliveryStatus, "problem"));
+    } else if (subFilter === "not_received") {
+      filters.push(
+        sql`(${deliveryOrders.deliveryStatus} = 'pending' OR (${deliveryOrders.id} IS NULL AND (${bills.status} IN ('open', 'held', 'intraday') OR ${bills.balanceDue} > 0)))`,
+      );
+    } else {
+      filters.push(
+        sql`(${deliveryOrders.id} IS NOT NULL OR ${bills.status} IN ('open', 'held', 'intraday') OR ${bills.balanceDue} > 0)`,
+      );
+    }
   }
 
   if (subFilter === "completed") {
@@ -966,18 +1229,7 @@ export async function listBillQuery(
   }
 
   if (q) {
-    const p = `%${q}%`;
-    filters.push(
-      or(
-        like(bills.invoiceNo, p),
-        like(bills.legacySc, p),
-        like(bills.notes, p),
-        like(customers.legacyId, p),
-        like(customers.nameZh, p),
-        like(customers.nameEn, p),
-        like(customers.phone, p),
-      )!,
-    );
+    filters.push(buildBillHeaderSearchFilter(q, searchField, matchMode));
   }
 
   const rows = await conn.db
@@ -988,12 +1240,18 @@ export async function listBillQuery(
       status: bills.status,
       paymentStatus: bills.paymentStatus,
       businessDate: bills.businessDate,
+      discountAmount: bills.discountAmount,
       netAmount: bills.netAmount,
+      paidAmount: bills.paidAmount,
       balanceDue: bills.balanceDue,
       issuedAt: bills.issuedAt,
+      legacySc: bills.legacySc,
+      customerLegacyId: customers.legacyId,
       customerNameZh: customers.nameZh,
       customerNameEn: customers.nameEn,
       deliveryStatus: deliveryOrders.deliveryStatus,
+      legacyOrl: deliveryOrders.legacyOrl,
+      deliveryRemarks: deliveryOrders.remarks,
     })
     .from(bills)
     .leftJoin(customers, eq(bills.customerId, customers.id))
@@ -1002,18 +1260,221 @@ export async function listBillQuery(
     .orderBy(desc(bills.issuedAt), desc(bills.id))
     .limit(subFilter === "last30" ? 30 : 200);
 
-  return rows.map((row) => ({
-    invoiceNo: row.invoiceNo,
-    docType: row.docType,
-    status: row.status,
-    paymentStatus: row.paymentStatus,
-    businessDate: row.businessDate,
-    customerName: row.customerNameZh || row.customerNameEn || "散客",
-    netAmountHkd: Number(row.netAmount),
-    balanceDueHkd: Number(row.balanceDue),
-    issuedAtIso: row.issuedAt.toISOString(),
-    deliveryStatus: row.deliveryStatus,
-  }));
+  const pmtLabelsByBill = new Map<number, string[]>();
+  if (rows.length > 0) {
+    const billIds = rows.map((r) => r.id);
+    const pmtRows = await conn.db
+      .select({
+        billId: billPayments.billId,
+        tenderCode: billPayments.tenderCode,
+        amount: billPayments.amount,
+        legacyPm: payMethods.legacyPm,
+        nameZh: payMethods.nameZh,
+      })
+      .from(billPayments)
+      .leftJoin(payMethods, eq(payMethods.id, billPayments.payMethodId))
+      .where(and(inArray(billPayments.billId, billIds), eq(billPayments.voided, false)))
+      .orderBy(asc(billPayments.id));
+
+    for (const p of pmtRows) {
+      const arr = pmtLabelsByBill.get(p.billId) ?? [];
+      const prefix = p.legacyPm !== null && p.legacyPm !== undefined ? `${p.legacyPm}-` : "";
+      const name = p.nameZh || p.tenderCode;
+      arr.push(`${prefix}${name} $${Number(p.amount).toFixed(1)}`);
+      pmtLabelsByBill.set(p.billId, arr);
+    }
+  }
+
+  return rows.map((row) => {
+    const pmts = pmtLabelsByBill.get(row.id) ?? [];
+    return {
+      invoiceNo: row.invoiceNo,
+      docType: row.docType,
+      status: row.status,
+      paymentStatus: row.paymentStatus,
+      businessDate: row.businessDate,
+      customerLegacyId: row.customerLegacyId ?? "",
+      customerName: row.customerNameZh || row.customerNameEn || "散客",
+      discountAmountHkd: Number(row.discountAmount),
+      netAmountHkd: Number(row.netAmount),
+      paidAmountHkd: Number(row.paidAmount),
+      balanceDueHkd: Number(row.balanceDue),
+      issuedAtIso: row.issuedAt.toISOString(),
+      deliveryStatus: row.deliveryStatus,
+      legacyOrl: row.legacyOrl ?? "",
+      deliveryRemarks: row.deliveryRemarks ?? "",
+      legacySc: row.legacySc ?? "",
+      payment1Label: pmts[0] ?? (row.balanceDue && Number(row.balanceDue) > 0 ? "8-送貨" : ""),
+      payment2Label: pmts[1] ?? "",
+    };
+  });
+}
+
+export async function listBillQueryItems(params: {
+  shopId: number;
+  q?: string;
+  date?: string;
+  searchField?: BillQuerySearchField;
+  matchMode?: QueryMatchMode;
+  limit?: number;
+}) {
+  const conn = requireSharedDb();
+  const limit = Math.min(200, Math.max(10, params.limit ?? 120));
+  const filters = [eq(bills.shopId, params.shopId)];
+
+  if (params.date && params.date !== "ALL" && /^\d{4}-\d{2}-\d{2}$/.test(params.date)) {
+    filters.push(eq(bills.businessDate, params.date));
+  }
+  const cleanQ = params.q?.trim();
+  if (cleanQ) {
+    const p = buildLikePattern(cleanQ, params.matchMode ?? "contains");
+    const field = params.searchField ?? "all";
+    if (field === "ubc") {
+      filters.push(like(products.ubc, p));
+    } else if (field === "sku") {
+      filters.push(like(billLines.sku, p));
+    } else if (field === "invoice_no") {
+      filters.push(like(bills.invoiceNo, p));
+    } else if (field === "customer_id") {
+      filters.push(like(customers.legacyId, p));
+    } else if (field === "name") {
+      filters.push(or(like(billLines.nameZh, p), like(billLines.nameEn, p))!);
+    } else {
+      filters.push(
+        or(
+          like(bills.invoiceNo, p),
+          like(billLines.sku, p),
+          like(products.ubc, p),
+          like(billLines.nameZh, p),
+          like(billLines.nameEn, p),
+          like(bills.notes, p),
+        )!,
+      );
+    }
+  }
+
+  const rows = await conn.db
+    .select({
+      invoiceNo: bills.invoiceNo,
+      issuedAt: bills.issuedAt,
+      businessDate: bills.businessDate,
+      billStatus: bills.status,
+      billNotes: bills.notes,
+      sku: billLines.sku,
+      ubc: products.ubc,
+      nameZh: billLines.nameZh,
+      nameEn: billLines.nameEn,
+      quantity: billLines.quantity,
+      lineTotal: billLines.lineTotal,
+      cancelled: billLines.cancelled,
+      lineNotes: billLines.notes,
+      lineSerialNo: billLines.serialNo,
+    })
+    .from(billLines)
+    .innerJoin(bills, eq(bills.id, billLines.billId))
+    .leftJoin(products, eq(products.id, billLines.productId))
+    .leftJoin(customers, eq(customers.id, bills.customerId))
+    .where(and(...filters))
+    .orderBy(desc(bills.issuedAt), desc(billLines.id))
+    .limit(limit);
+
+  return rows.map((r) => {
+    const noteText = r.lineNotes || r.billNotes || "";
+    const snMatch = noteText.match(/S\/N:\s*([^\s,;]+)/i);
+    return {
+      invoiceNo: r.invoiceNo,
+      issuedAtIso: r.issuedAt.toISOString(),
+      businessDate: r.businessDate,
+      sku: r.sku,
+      ubc: r.ubc ?? r.sku,
+      nameZh: r.nameZh,
+      nameEn: r.nameEn || r.nameZh,
+      serialNo: r.lineSerialNo || (snMatch ? `S/N:${snMatch[1]}` : ""),
+      notes: noteText,
+      cancelled: Boolean(r.cancelled) || r.billStatus === "cancelled",
+      quantity: Number(r.quantity),
+      lineTotalHkd: Number(r.lineTotal),
+    };
+  });
+}
+
+export async function listBillQueryPayments(params: {
+  shopId: number;
+  q?: string;
+  date?: string;
+  searchField?: BillQuerySearchField;
+  matchMode?: QueryMatchMode;
+  limit?: number;
+}) {
+  const conn = requireSharedDb();
+  const limit = Math.min(200, Math.max(10, params.limit ?? 120));
+  const filters = [eq(bills.shopId, params.shopId), eq(billPayments.voided, false)];
+
+  if (params.date && params.date !== "ALL" && /^\d{4}-\d{2}-\d{2}$/.test(params.date)) {
+    filters.push(eq(billPayments.businessDate, params.date));
+  }
+  const cleanQ = params.q?.trim();
+  if (cleanQ) {
+    const p = buildLikePattern(cleanQ, params.matchMode ?? "contains");
+    const field = params.searchField ?? "all";
+    if (field === "invoice_no") {
+      filters.push(like(bills.invoiceNo, p));
+    } else if (field === "customer_id") {
+      filters.push(like(customers.legacyId, p));
+    } else if (field === "tender") {
+      filters.push(or(like(billPayments.tenderCode, p), like(payMethods.nameZh, p), like(payMethods.nameEn, p))!);
+    } else {
+      filters.push(
+        or(
+          like(bills.invoiceNo, p),
+          like(billPayments.tenderCode, p),
+          like(payMethods.nameZh, p),
+          like(billPayments.remarks, p),
+          like(billPayments.referenceNo, p),
+          like(billPayments.approvalCode, p),
+        )!,
+      );
+    }
+  }
+
+  const rows = await conn.db
+    .select({
+      invoiceNo: bills.invoiceNo,
+      paidAt: billPayments.paidAt,
+      businessDate: billPayments.businessDate,
+      tenderCode: billPayments.tenderCode,
+      legacyPm: payMethods.legacyPm,
+      payMethodNameZh: payMethods.nameZh,
+      payMethodNameEn: payMethods.nameEn,
+      amount: billPayments.amount,
+      remarks: billPayments.remarks,
+      referenceNo: billPayments.referenceNo,
+      approvalCode: billPayments.approvalCode,
+      terminalMn: terminals.legacyMn,
+    })
+    .from(billPayments)
+    .innerJoin(bills, eq(bills.id, billPayments.billId))
+    .leftJoin(payMethods, eq(payMethods.id, billPayments.payMethodId))
+    .leftJoin(terminals, eq(terminals.id, bills.terminalId))
+    .leftJoin(customers, eq(customers.id, bills.customerId))
+    .where(and(...filters))
+    .orderBy(desc(billPayments.paidAt), desc(billPayments.id))
+    .limit(limit);
+
+  return rows.map((r) => {
+    const pmPrefix = r.legacyPm !== null && r.legacyPm !== undefined ? `${r.legacyPm}-` : "";
+    const pmName = r.payMethodNameZh || r.payMethodNameEn || r.tenderCode;
+    return {
+      invoiceNo: r.invoiceNo,
+      paidAtIso: r.paidAt.toISOString(),
+      businessDate: r.businessDate,
+      tenderCode: r.tenderCode,
+      tenderLabel: `${pmPrefix}${pmName}`,
+      amountHkd: Number(r.amount),
+      remarks: [r.remarks, r.referenceNo, r.approvalCode].filter(Boolean).join(" · "),
+      terminalMn: r.terminalMn ?? 1,
+    };
+  });
 }
 
 export async function getInvoiceDetailByNo(invoiceNo: string) {
@@ -1041,6 +1502,7 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
       customerNameZh: customers.nameZh,
       customerNameEn: customers.nameEn,
       customerPhone: customers.phone,
+      customerAddress: customers.address,
       customerPointsBalance: customers.pointsBalance,
     })
     .from(bills)
@@ -1051,7 +1513,29 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
   if (!bill) return null;
 
   const [lines, pmts, settings, deliveries] = await Promise.all([
-    conn.db.select().from(billLines).where(eq(billLines.billId, bill.id)).orderBy(billLines.lineNo),
+    conn.db
+      .select({
+        lineNo: billLines.lineNo,
+        sku: billLines.sku,
+        ubc: products.ubc,
+        colorName: products.colorName,
+        sizeName: products.sizeName,
+        nameZh: billLines.nameZh,
+        nameEn: billLines.nameEn,
+        categoryC1: billLines.categoryC1,
+        quantity: billLines.quantity,
+        unitPrice: billLines.unitPrice,
+        discountRate: billLines.discountRate,
+        lineTotal: billLines.lineTotal,
+        cancelled: billLines.cancelled,
+        legacyDk: billLines.legacyDk,
+        notes: billLines.notes,
+        serialNo: billLines.serialNo,
+      })
+      .from(billLines)
+      .leftJoin(products, eq(products.id, billLines.productId))
+      .where(eq(billLines.billId, bill.id))
+      .orderBy(billLines.lineNo),
     conn.db
       .select()
       .from(billPayments)
@@ -1084,6 +1568,7 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
             nameZh: bill.customerNameZh ?? "",
             nameEn: bill.customerNameEn ?? "",
             phone: bill.customerPhone ?? "",
+            address: bill.customerAddress ?? "",
             pointsBalance: bill.customerPointsBalance ?? 0,
           }
         : null,
@@ -1091,6 +1576,9 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
     lines: lines.map((l) => ({
       lineNo: l.lineNo,
       sku: l.sku,
+      ubc: l.ubc ?? "",
+      colorName: l.colorName ?? "",
+      sizeName: l.sizeName ?? "",
       nameZh: l.nameZh,
       nameEn: l.nameEn,
       categoryC1: l.categoryC1,
@@ -1100,6 +1588,8 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
       lineTotalHkd: Number(l.lineTotal),
       cancelled: l.cancelled,
       dk: l.legacyDk,
+      notes: l.notes ?? "",
+      serialNo: l.serialNo ?? "",
     })),
     payments: pmts.map((p) => ({
       tenderCode: p.tenderCode,
@@ -1158,17 +1648,25 @@ export async function listStockOverview(params: { q?: string; limit?: number; sh
   }));
 }
 
+export type StockFilterMode = "all" | "positive" | "negative" | "zero";
+export type StockSortMode = "barcode" | "name" | "qty_desc" | "qty_asc";
+
 export async function listStockPage(params: {
   q?: string;
   categoryC1?: number;
+  matchMode?: QueryMatchMode;
+  stockFilter?: StockFilterMode;
+  sortBy?: StockSortMode;
   page?: number;
   pageSize?: number;
   shopId: number;
 }) {
+  const t0 = Date.now();
   const conn = requireSharedDb();
   const page = Math.max(1, params.page ?? 1);
   const pageSize = Math.min(200, Math.max(1, params.pageSize ?? 80));
-  const pattern = params.q?.trim() ? `%${params.q.trim()}%` : undefined;
+  const cleanQ = params.q?.trim();
+  const pattern = cleanQ ? buildLikePattern(cleanQ, params.matchMode ?? "contains") : undefined;
   const filters = [];
   if (pattern) {
     filters.push(
@@ -1183,46 +1681,170 @@ export async function listStockPage(params: {
   if (params.categoryC1 !== undefined && Number.isFinite(params.categoryC1)) {
     filters.push(eq(products.legacyC1, params.categoryC1));
   }
+  if (params.stockFilter === "positive") {
+    filters.push(sql`COALESCE(${stockBalances.onHandQty}, 0) > 0`);
+  } else if (params.stockFilter === "negative") {
+    filters.push(sql`COALESCE(${stockBalances.onHandQty}, 0) < 0`);
+  } else if (params.stockFilter === "zero") {
+    filters.push(sql`COALESCE(${stockBalances.onHandQty}, 0) = 0`);
+  }
+
   const whereClause = filters.length > 0 ? and(...filters) : undefined;
-  const [countRow] = await conn.db.select({ count: sql<number>`COUNT(*)` }).from(products).where(whereClause);
-  const total = Number(countRow?.count ?? 0);
-  const rows = await conn.db
-    .select({
-      productId: products.id,
-      sku: products.barcode,
-      nameZh: products.nameZh,
-      nameEn: products.nameEn,
-      categoryC1: products.legacyC1,
-      sellPrice: products.sellPrice,
-      onHandQty: stockBalances.onHandQty,
-      movingAvgCost: stockBalances.movingAvgCost,
-    })
+  const [countRow] = await conn.db
+    .select({ count: sql<number>`COUNT(*)` })
     .from(products)
     .leftJoin(
       stockBalances,
       and(eq(stockBalances.productId, products.id), eq(stockBalances.shopId, params.shopId)),
     )
+    .where(whereClause);
+  const total = Number(countRow?.count ?? 0);
+
+  const orderClause =
+    params.sortBy === "name"
+      ? [asc(products.nameZh), asc(products.barcode)]
+      : params.sortBy === "qty_desc"
+        ? [desc(sql`COALESCE(${stockBalances.onHandQty}, 0)`), asc(products.barcode)]
+        : params.sortBy === "qty_asc"
+          ? [asc(sql`COALESCE(${stockBalances.onHandQty}, 0)`), asc(products.barcode)]
+          : [asc(products.barcode)];
+
+  const rows = await conn.db
+    .select({
+      productId: products.id,
+      sku: products.barcode,
+      ubc: products.ubc,
+      nameZh: products.nameZh,
+      nameEn: products.nameEn,
+      colorName: products.colorName,
+      sizeName: products.sizeName,
+      categoryC1: products.legacyC1,
+      unitNameZh: units.nameZh,
+      sellPrice: products.sellPrice,
+      onHandQty: stockBalances.onHandQty,
+      movingAvgCost: stockBalances.movingAvgCost,
+    })
+    .from(products)
+    .leftJoin(units, eq(units.id, products.unitId))
+    .leftJoin(
+      stockBalances,
+      and(eq(stockBalances.productId, products.id), eq(stockBalances.shopId, params.shopId)),
+    )
     .where(whereClause)
-    .orderBy(products.barcode)
+    .orderBy(...orderClause)
     .limit(pageSize)
     .offset((page - 1) * pageSize);
 
+  const productIds = rows.map((r) => r.productId);
+  const pendingMap = new Map<number, number>();
+  const lastSaleMap = new Map<number, { date: string; days: number }>();
+  const lastPurchaseMap = new Map<number, { date: string; days: number; supplier: string }>();
+
+  if (productIds.length > 0) {
+    const ph = productIds.map(() => "?").join(",");
+    const todayHkt = formatHktBusinessDate();
+    const [[pendRows], [saleRows], [purRows]] = await Promise.all([
+      conn.pool.query<mysql.RowDataPacket[]>(
+        `SELECT bl.product_id, COALESCE(SUM(bl.quantity), 0) AS qty
+         FROM bill_lines bl
+         INNER JOIN bills b ON b.id = bl.bill_id
+         INNER JOIN delivery_orders d ON d.bill_id = b.id
+         WHERE b.shop_id = ?
+           AND b.status <> 'cancelled'
+           AND bl.cancelled = 0
+           AND d.delivery_status = 'pending'
+           AND bl.product_id IN (${ph})
+         GROUP BY bl.product_id`,
+        [params.shopId, ...productIds],
+      ),
+      conn.pool.query<mysql.RowDataPacket[]>(
+        `SELECT bl.product_id,
+                MAX(b.business_date) AS last_date,
+                DATEDIFF(STR_TO_DATE(?, '%Y-%m-%d'), STR_TO_DATE(MAX(b.business_date), '%Y-%m-%d')) AS days_ago
+         FROM bill_lines bl
+         INNER JOIN bills b ON b.id = bl.bill_id
+         WHERE b.shop_id = ?
+           AND b.status NOT IN ('cancelled', 'held')
+           AND b.doc_type IN ('RETAIL_SALE', 'SALES_INVOICE')
+           AND bl.cancelled = 0
+           AND bl.product_id IN (${ph})
+         GROUP BY bl.product_id`,
+        [todayHkt, params.shopId, ...productIds],
+      ),
+      conn.pool.query<mysql.RowDataPacket[]>(
+        `SELECT bl.product_id,
+                MAX(b.business_date) AS last_date,
+                DATEDIFF(STR_TO_DATE(?, '%Y-%m-%d'), STR_TO_DATE(MAX(b.business_date), '%Y-%m-%d')) AS days_ago,
+                MAX(COALESCE(NULLIF(sup.name_zh, ''), NULLIF(b.legacy_sc, ''), '')) AS supplier_name
+         FROM bill_lines bl
+         INNER JOIN bills b ON b.id = bl.bill_id
+         LEFT JOIN suppliers sup ON sup.legacy_id = b.legacy_sc
+         WHERE b.shop_id = ?
+           AND b.status <> 'cancelled'
+           AND b.doc_type = 'GOODS_RECEIPT'
+           AND bl.cancelled = 0
+           AND bl.product_id IN (${ph})
+         GROUP BY bl.product_id`,
+        [todayHkt, params.shopId, ...productIds],
+      ),
+    ]);
+
+    for (const r of pendRows) pendingMap.set(Number(r.product_id), Number(r.qty ?? 0));
+    for (const r of saleRows) {
+      if (r.last_date) {
+        lastSaleMap.set(Number(r.product_id), {
+          date: String(r.last_date),
+          days: Math.max(0, Number(r.days_ago ?? 0)),
+        });
+      }
+    }
+    for (const r of purRows) {
+      if (r.last_date) {
+        lastPurchaseMap.set(Number(r.product_id), {
+          date: String(r.last_date),
+          days: Math.max(0, Number(r.days_ago ?? 0)),
+          supplier: String(r.supplier_name ?? ""),
+        });
+      }
+    }
+  }
+
   return {
-    items: rows.map((row) => ({
-      productId: row.productId,
-      sku: row.sku,
-      nameZh: row.nameZh,
-      nameEn: row.nameEn || row.nameZh,
-      categoryC1: row.categoryC1,
-      sellPriceHkd: Number(row.sellPrice),
-      onHandQty: Number(row.onHandQty ?? 0),
-      movingAvgCostHkd: Number(row.movingAvgCost ?? 0),
-      valuationHkd: Number((Number(row.onHandQty ?? 0) * Number(row.movingAvgCost ?? 0)).toFixed(2)),
-    })),
+    items: rows.map((row) => {
+      const onHandQty = Number(row.onHandQty ?? 0);
+      const pendingDeliveryQty = pendingMap.get(row.productId) ?? 0;
+      const saleInfo = lastSaleMap.get(row.productId);
+      const purInfo = lastPurchaseMap.get(row.productId);
+      return {
+        productId: row.productId,
+        sku: row.sku,
+        ubc: row.ubc || row.sku,
+        nameZh: row.nameZh,
+        nameEn: row.nameEn || row.nameZh,
+        categoryC1: row.categoryC1,
+        unitName: row.unitNameZh || "",
+        color: "",
+        size: "",
+        supplierName: purInfo?.supplier ?? "",
+        sellPriceHkd: Number(row.sellPrice),
+        onHandQty,
+        pendingDeliveryQty,
+        availableQty: Number((onHandQty - pendingDeliveryQty).toFixed(4)),
+        onOrderQty: 0,
+        transferringQty: 0,
+        lastSaleDate: saleInfo?.date ?? null,
+        daysSinceLastSale: saleInfo?.days ?? null,
+        lastPurchaseDate: purInfo?.date ?? null,
+        daysSinceLastPurchase: purInfo?.days ?? null,
+        movingAvgCostHkd: Number(row.movingAvgCost ?? 0),
+        valuationHkd: Number((onHandQty * Number(row.movingAvgCost ?? 0)).toFixed(2)),
+      };
+    }),
     total,
     page,
     pageSize,
     pageCount: Math.max(1, Math.ceil(total / pageSize)),
+    elapsedSec: Number(((Date.now() - t0) / 1000).toFixed(1)),
   };
 }
 
@@ -1464,4 +2086,264 @@ export async function getCustomerPointLedger(customerId: number) {
     .where(eq(crmPointLedger.customerId, customerId))
     .orderBy(desc(crmPointLedger.createdAt))
     .limit(30);
+}
+
+export type SuggestKind =
+  | "staff_login"
+  | "product"
+  | "customer"
+  | "supplier"
+  | "invoice"
+  | "payment_ref";
+
+export interface FieldSuggestionItem {
+  value: string;
+  label: string;
+  sublabel?: string;
+  fields?: Record<string, string>;
+}
+
+const DEFAULT_HK_PAYMENT_REFS = [
+  "HSBC-TT-",
+  "BOC-FPS-",
+  "HANGSENG-TT-",
+  "SCB-TT-",
+  "BEA-CHQ-",
+  "FPS-",
+  "CHQ-",
+];
+
+/**
+ * Returns live database autosuggestions (plus standard HK payment reference prefixes)
+ * for text inputs across login, POS, AR invoicing, reports, and Back Office forms.
+ */
+export async function getFieldSuggestions(params: {
+  kind: SuggestKind;
+  q?: string;
+  shopId?: number;
+  limit?: number;
+}): Promise<FieldSuggestionItem[]> {
+  const { pool } = requireSharedDb();
+  const cleanQ = params.q?.trim() ?? "";
+  const limit = Math.min(20, Math.max(1, params.limit ?? 10));
+  const pat = `%${cleanQ}%`;
+  const prefixPat = `${cleanQ}%`;
+
+  if (params.kind === "staff_login") {
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      cleanQ
+        ? `SELECT legacy_id, display_name
+           FROM staff
+           WHERE active = 1 AND legacy_id IS NOT NULL AND (legacy_id LIKE ? OR display_name LIKE ?)
+           ORDER BY (CASE WHEN legacy_id LIKE ? THEN 0 ELSE 1 END), legacy_id ASC
+           LIMIT ?`
+        : `SELECT legacy_id, display_name
+           FROM staff
+           WHERE active = 1 AND legacy_id IS NOT NULL
+           ORDER BY legacy_id ASC
+           LIMIT ?`,
+      cleanQ ? [pat, pat, prefixPat, limit] : [limit],
+    );
+    return rows.map((r) => ({
+      value: String(r.legacy_id),
+      label: String(r.display_name),
+      sublabel: "職員",
+      fields: { legacyId: String(r.legacy_id), displayName: String(r.display_name) },
+    }));
+  }
+
+  if (params.kind === "product") {
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      cleanQ
+        ? `SELECT barcode, ubc, name_zh, name_en, sell_price
+           FROM products
+           WHERE active = 1 AND (barcode LIKE ? OR ubc LIKE ? OR name_zh LIKE ? OR name_en LIKE ?)
+           ORDER BY (CASE WHEN barcode LIKE ? OR ubc LIKE ? THEN 0 ELSE 1 END), barcode ASC
+           LIMIT ?`
+        : `SELECT barcode, ubc, name_zh, name_en, sell_price
+           FROM products
+           WHERE active = 1
+           ORDER BY barcode ASC
+           LIMIT ?`,
+      cleanQ ? [pat, pat, pat, pat, prefixPat, prefixPat, limit] : [limit],
+    );
+    return rows.map((r) => {
+      const sku = String(r.barcode);
+      const ubc = String(r.ubc ?? "");
+      const nameZh = String(r.name_zh ?? "");
+      const nameEn = String(r.name_en ?? "");
+      const price = Number(r.sell_price ?? 0).toFixed(2);
+      return {
+        value: sku,
+        label: nameZh || nameEn || sku,
+        sublabel: ubc ? `${ubc} · HK$${price}` : `HK$${price}`,
+        fields: { sku, ubc, nameZh, nameEn, price },
+      };
+    });
+  }
+
+  if (params.kind === "customer") {
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      cleanQ
+        ? `SELECT
+             c.legacy_id,
+             COALESCE((SELECT mc.card_no FROM member_cards mc WHERE mc.customer_id = c.id AND mc.active = 1 ORDER BY mc.id LIMIT 1), '') AS card_no,
+             c.name_zh,
+             c.name_en,
+             c.phone,
+             c.email
+           FROM customers c
+           WHERE c.active = 1
+             AND (
+               c.legacy_id LIKE ? OR c.name_zh LIKE ? OR c.name_en LIKE ? OR c.phone LIKE ? OR c.email LIKE ?
+               OR EXISTS (SELECT 1 FROM member_cards mc2 WHERE mc2.customer_id = c.id AND mc2.card_no LIKE ?)
+             )
+           ORDER BY c.points_balance DESC, c.id DESC
+           LIMIT ?`
+        : `SELECT
+             c.legacy_id,
+             COALESCE((SELECT mc.card_no FROM member_cards mc WHERE mc.customer_id = c.id AND mc.active = 1 ORDER BY mc.id LIMIT 1), '') AS card_no,
+             c.name_zh,
+             c.name_en,
+             c.phone,
+             c.email
+           FROM customers c
+           WHERE c.active = 1
+           ORDER BY c.points_balance DESC, c.id DESC
+           LIMIT ?`,
+      cleanQ ? [pat, pat, pat, pat, pat, pat, limit] : [limit],
+    );
+    return rows.map((r) => {
+      const legacyId = String(r.legacy_id);
+      const cardNo = String(r.card_no ?? "");
+      const nameZh = String(r.name_zh ?? "");
+      const nameEn = String(r.name_en ?? "");
+      const phone = String(r.phone ?? "");
+      const email = String(r.email ?? "");
+      return {
+        value: legacyId,
+        label: nameZh || nameEn || legacyId,
+        sublabel: [cardNo, phone].filter(Boolean).join(" · ") || undefined,
+        fields: { legacyId, cardNo, nameZh, nameEn, phone, email },
+      };
+    });
+  }
+
+  if (params.kind === "supplier") {
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      cleanQ
+        ? `SELECT legacy_id, name_zh, name_en, phone
+           FROM suppliers
+           WHERE active = 1 AND (legacy_id LIKE ? OR name_zh LIKE ? OR name_en LIKE ? OR phone LIKE ?)
+           ORDER BY (CASE WHEN legacy_id LIKE ? THEN 0 ELSE 1 END), legacy_id ASC
+           LIMIT ?`
+        : `SELECT legacy_id, name_zh, name_en, phone
+           FROM suppliers
+           WHERE active = 1
+           ORDER BY legacy_id ASC
+           LIMIT ?`,
+      cleanQ ? [pat, pat, pat, pat, prefixPat, limit] : [limit],
+    );
+    return rows.map((r) => {
+      const legacyId = String(r.legacy_id);
+      const nameZh = String(r.name_zh ?? "");
+      const nameEn = String(r.name_en ?? "");
+      const phone = String(r.phone ?? "");
+      return {
+        value: legacyId,
+        label: nameZh || nameEn || legacyId,
+        sublabel: phone || undefined,
+        fields: { legacyId, nameZh, nameEn, phone },
+      };
+    });
+  }
+
+  const targetShopId = params.shopId ?? (await resolveActiveStoreContext()).shopId;
+
+  if (params.kind === "invoice") {
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      cleanQ
+        ? `SELECT
+             b.invoice_no,
+             b.doc_type,
+             b.business_date,
+             b.net_amount,
+             COALESCE(NULLIF(c.name_zh, ''), NULLIF(c.name_en, ''), b.legacy_sc, '') AS party
+           FROM bills b
+           LEFT JOIN customers c ON c.id = b.customer_id
+           WHERE b.shop_id = ?
+             AND (b.invoice_no LIKE ? OR COALESCE(c.name_zh, '') LIKE ? OR COALESCE(c.name_en, '') LIKE ? OR COALESCE(c.phone, '') LIKE ? OR COALESCE(b.legacy_sc, '') LIKE ? OR COALESCE(b.notes, '') LIKE ?)
+           ORDER BY b.id DESC
+           LIMIT ?`
+        : `SELECT
+             b.invoice_no,
+             b.doc_type,
+             b.business_date,
+             b.net_amount,
+             COALESCE(NULLIF(c.name_zh, ''), NULLIF(c.name_en, ''), b.legacy_sc, '') AS party
+           FROM bills b
+           LEFT JOIN customers c ON c.id = b.customer_id
+           WHERE b.shop_id = ?
+           ORDER BY b.id DESC
+           LIMIT ?`,
+      cleanQ ? [targetShopId, pat, pat, pat, pat, pat, pat, limit] : [targetShopId, limit],
+    );
+    return rows.map((r) => {
+      const invoiceNo = String(r.invoice_no);
+      const party = String(r.party ?? "");
+      const bDate = String(r.business_date ?? "");
+      return {
+        value: invoiceNo,
+        label: party ? `${party} (${bDate})` : `${String(r.doc_type)} (${bDate})`,
+        sublabel: `HK$${Number(r.net_amount ?? 0).toFixed(2)}`,
+        fields: { invoiceNo },
+      };
+    });
+  }
+
+  // payment_ref
+  const [refRows] = await pool.query<mysql.RowDataPacket[]>(
+    cleanQ
+      ? `SELECT ref_val FROM (
+           SELECT COALESCE(NULLIF(TRIM(bp.reference_no), ''), NULLIF(TRIM(bp.approval_code), '')) AS ref_val, MAX(bp.id) AS max_id
+           FROM bill_payments bp
+           INNER JOIN bills b ON b.id = bp.bill_id
+           WHERE b.shop_id = ?
+             AND bp.voided = 0
+             AND (NULLIF(TRIM(bp.reference_no), '') IS NOT NULL OR NULLIF(TRIM(bp.approval_code), '') IS NOT NULL)
+           GROUP BY COALESCE(NULLIF(TRIM(bp.reference_no), ''), NULLIF(TRIM(bp.approval_code), ''))
+         ) t
+         WHERE ref_val LIKE ?
+         ORDER BY t.max_id DESC
+         LIMIT ?`
+      : `SELECT ref_val FROM (
+           SELECT COALESCE(NULLIF(TRIM(bp.reference_no), ''), NULLIF(TRIM(bp.approval_code), '')) AS ref_val, MAX(bp.id) AS max_id
+           FROM bill_payments bp
+           INNER JOIN bills b ON b.id = bp.bill_id
+           WHERE b.shop_id = ?
+             AND bp.voided = 0
+             AND (NULLIF(TRIM(bp.reference_no), '') IS NOT NULL OR NULLIF(TRIM(bp.approval_code), '') IS NOT NULL)
+           GROUP BY COALESCE(NULLIF(TRIM(bp.reference_no), ''), NULLIF(TRIM(bp.approval_code), ''))
+         ) t
+         ORDER BY t.max_id DESC
+         LIMIT ?`,
+    cleanQ ? [targetShopId, pat, limit] : [targetShopId, limit],
+  );
+
+  const out: FieldSuggestionItem[] = [];
+  const seen = new Set<string>();
+  for (const r of refRows) {
+    const val = String(r.ref_val ?? "").trim();
+    if (!val || seen.has(val)) continue;
+    seen.add(val);
+    out.push({ value: val, label: val, sublabel: "近期參考號" });
+  }
+  const ql = cleanQ.toLowerCase();
+  for (const prefix of DEFAULT_HK_PAYMENT_REFS) {
+    if ((!ql || prefix.toLowerCase().includes(ql)) && !seen.has(prefix) && out.length < limit) {
+      seen.add(prefix);
+      out.push({ value: prefix, label: prefix, sublabel: "常用前綴" });
+    }
+  }
+  return out;
 }

@@ -13,6 +13,11 @@ const LABEL_MESSAGES: Record<string, MessageTemplate> = {
     SC: "{barcode} - 条码编号不存在，请输入另一编号！",
     ENG: "{barcode} - Barcode does not exist. Please enter another code.",
   },
+  "020": {
+    TC: "折扣不可 > 100% ！",
+    SC: "折扣不可 > 100% ！",
+    ENG: "Discount cannot > 100% !",
+  },
   "021": {
     TC: "請先選擇貨品項目！",
     SC: "请先选择货品项目！",
@@ -42,6 +47,11 @@ const LABEL_MESSAGES: Record<string, MessageTemplate> = {
     TC: "此貨品為固定售價 / 不設折扣項目！",
     SC: "此货品为固定售价 / 不设折扣项目！",
     ENG: "This item is fixed-price and does not allow discounts.",
+  },
+  "027": {
+    TC: "目標總價不可高於原價或低於 $0！",
+    SC: "目标总价不可高于原价或低于 $0！",
+    ENG: "Target bill total must be between $0 and gross total!",
   },
   "044": {
     TC: "會員積分不足或兌換組合無效！",

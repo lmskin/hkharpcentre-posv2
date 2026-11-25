@@ -232,9 +232,22 @@ test.describe("Modules 1-12: Full-Stack API, Hardware Bridge & Legacy V47 Parity
     expect(settleJson.totalCents).toBe(11300);
   });
 
-  test("Module 3: Auth audit, RBAC L1 vs L5, Supervisor managerPin override, & password/PIN update", async ({
+  test("Module 3: Passwordless dev default L5 session, Auth audit, RBAC L1 vs L5, Supervisor managerPin override, & password/PIN update", async ({
     request,
+    playwright,
   }) => {
+    // Login disabled by default for dev site: unauthenticated browser/API starts with L5 default session
+    const anonCtx = await playwright.request.newContext({ baseURL: "http://127.0.0.1:3100" });
+    try {
+      const meRes = await anonCtx.get("/api/auth/me");
+      expect(meRes.status()).toBe(200);
+      const meJson = (await meRes.json()) as { authenticated: boolean; user: { roleLevel: number; legacyId: string } | null };
+      expect(meJson.authenticated).toBe(true);
+      expect(meJson.user?.roleLevel).toBeGreaterThanOrEqual(5);
+    } finally {
+      await anonCtx.dispose();
+    }
+
     const badLogin = await loginApi(request, { staffCode: "101", password: "wrong-password" });
     expect(badLogin.status()).toBe(401);
     expect((await badLogin.json()).code).toBe("003");
@@ -914,5 +927,30 @@ test.describe("Modules 1-12: Full-Stack API, Hardware Bridge & Legacy V47 Parity
     const mgrStats = await (await request.get(`/api/reports?view=stats&from=${repDate}&to=${repDate}`)).json();
     expect(mgrStats.supplierStats.some((s: { legacyId: string; grcCount: number }) => s.legacyId === sup.legacyId && s.grcCount >= 1)).toBe(true);
     expect(mgrStats.activityLogs.length).toBeGreaterThan(0);
+  });
+
+  test("Autocomplete & Autosuggestion API (/api/suggest) works passwordless in dev mode", async ({ playwright }) => {
+    const anonCtx = await playwright.request.newContext({ baseURL: "http://127.0.0.1:3100" });
+    try {
+      for (const [kind, q] of [
+        ["staff_login", "5002"],
+        ["product", "210810"],
+        ["customer", "2261"],
+        ["supplier", "SUP"],
+        ["invoice", ""],
+        ["payment_ref", "HSBC"],
+      ] as const) {
+        const res = await anonCtx.get(`/api/suggest?kind=${kind}&q=${encodeURIComponent(q)}`);
+        expect(res.status()).toBe(200);
+        const body = (await res.json()) as { suggestions: Array<{ value: string }> };
+        expect(body.suggestions.length).toBeGreaterThan(0);
+      }
+      const staffJson = (await (await anonCtx.get("/api/suggest?kind=staff_login&q=5002")).json()) as {
+        suggestions: Array<{ value: string }>;
+      };
+      expect(staffJson.suggestions.some((s) => s.value === "5002")).toBe(true);
+    } finally {
+      await anonCtx.dispose();
+    }
   });
 });

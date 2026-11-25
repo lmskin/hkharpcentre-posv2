@@ -78,57 +78,53 @@ export async function openE2eMysqlConnection(): Promise<Connection> {
   return mysql.createConnection({ uri: url, timezone: "+08:00" });
 }
 
-async function maxId(conn: Connection, table: string): Promise<number> {
-  const [rows] = await conn.query(`SELECT COALESCE(MAX(id), 0) AS m FROM \`${table}\``);
-  return Number((rows as Array<{ m: number }>)[0]?.m ?? 0);
-}
-
 export async function captureDbSnapshot(conn: Connection): Promise<DbSnapshot> {
-  const [
-    bills,
-    billLines,
-    billPayments,
-    auditLogs,
-    stockBalances,
-    stockMovements,
-    stockTakes,
-    stockTakeLines,
-    crmPointLedger,
-    dayEndBatches,
-    dayEndTenderCounts,
-    deliveryOrders,
-    pettyCashVouchers,
-    octopusTransactions,
-    octopusSettlements,
-    products,
-    customers,
-    memberCards,
-    suppliers,
-    appSettings,
-    billSequences,
-  ] = await Promise.all([
-    maxId(conn, "bills"),
-    maxId(conn, "bill_lines"),
-    maxId(conn, "bill_payments"),
-    maxId(conn, "audit_logs"),
-    maxId(conn, "stock_balances"),
-    maxId(conn, "stock_movements"),
-    maxId(conn, "stock_takes"),
-    maxId(conn, "stock_take_lines"),
-    maxId(conn, "crm_point_ledger"),
-    maxId(conn, "day_end_batches"),
-    maxId(conn, "day_end_tender_counts"),
-    maxId(conn, "delivery_orders"),
-    maxId(conn, "petty_cash_vouchers"),
-    maxId(conn, "octopus_transactions"),
-    maxId(conn, "octopus_settlements"),
-    maxId(conn, "products"),
-    maxId(conn, "customers"),
-    maxId(conn, "member_cards"),
-    maxId(conn, "suppliers"),
-    maxId(conn, "app_settings"),
-    maxId(conn, "bill_sequences"),
-  ]);
+  const [maxRows] = await conn.query(`
+    SELECT
+      (SELECT COALESCE(MAX(id), 0) FROM bills) AS bills,
+      (SELECT COALESCE(MAX(id), 0) FROM bill_lines) AS billLines,
+      (SELECT COALESCE(MAX(id), 0) FROM bill_payments) AS billPayments,
+      (SELECT COALESCE(MAX(id), 0) FROM audit_logs) AS auditLogs,
+      (SELECT COALESCE(MAX(id), 0) FROM stock_balances) AS stockBalances,
+      (SELECT COALESCE(MAX(id), 0) FROM stock_movements) AS stockMovements,
+      (SELECT COALESCE(MAX(id), 0) FROM stock_takes) AS stockTakes,
+      (SELECT COALESCE(MAX(id), 0) FROM stock_take_lines) AS stockTakeLines,
+      (SELECT COALESCE(MAX(id), 0) FROM crm_point_ledger) AS crmPointLedger,
+      (SELECT COALESCE(MAX(id), 0) FROM day_end_batches) AS dayEndBatches,
+      (SELECT COALESCE(MAX(id), 0) FROM day_end_tender_counts) AS dayEndTenderCounts,
+      (SELECT COALESCE(MAX(id), 0) FROM delivery_orders) AS deliveryOrders,
+      (SELECT COALESCE(MAX(id), 0) FROM petty_cash_vouchers) AS pettyCashVouchers,
+      (SELECT COALESCE(MAX(id), 0) FROM octopus_transactions) AS octopusTransactions,
+      (SELECT COALESCE(MAX(id), 0) FROM octopus_settlements) AS octopusSettlements,
+      (SELECT COALESCE(MAX(id), 0) FROM products) AS products,
+      (SELECT COALESCE(MAX(id), 0) FROM customers) AS customers,
+      (SELECT COALESCE(MAX(id), 0) FROM member_cards) AS memberCards,
+      (SELECT COALESCE(MAX(id), 0) FROM suppliers) AS suppliers,
+      (SELECT COALESCE(MAX(id), 0) FROM app_settings) AS appSettings,
+      (SELECT COALESCE(MAX(id), 0) FROM bill_sequences) AS billSequences
+  `);
+  const rawMax = (maxRows as Array<Record<string, number>>)[0]!;
+  const bills = Number(rawMax.bills);
+  const billLines = Number(rawMax.billLines);
+  const billPayments = Number(rawMax.billPayments);
+  const auditLogs = Number(rawMax.auditLogs);
+  const stockBalances = Number(rawMax.stockBalances);
+  const stockMovements = Number(rawMax.stockMovements);
+  const stockTakes = Number(rawMax.stockTakes);
+  const stockTakeLines = Number(rawMax.stockTakeLines);
+  const crmPointLedger = Number(rawMax.crmPointLedger);
+  const dayEndBatches = Number(rawMax.dayEndBatches);
+  const dayEndTenderCounts = Number(rawMax.dayEndTenderCounts);
+  const deliveryOrders = Number(rawMax.deliveryOrders);
+  const pettyCashVouchers = Number(rawMax.pettyCashVouchers);
+  const octopusTransactions = Number(rawMax.octopusTransactions);
+  const octopusSettlements = Number(rawMax.octopusSettlements);
+  const products = Number(rawMax.products);
+  const customers = Number(rawMax.customers);
+  const memberCards = Number(rawMax.memberCards);
+  const suppliers = Number(rawMax.suppliers);
+  const appSettings = Number(rawMax.appSettings);
+  const billSequences = Number(rawMax.billSequences);
 
   const [seqRows] = await conn.query("SELECT id, next_seq FROM bill_sequences");
   const [staffRows] = await conn.query(
@@ -316,21 +312,40 @@ export async function restoreDbSnapshot(conn: Connection, snap: DbSnapshot): Pro
   await conn.query("DELETE FROM app_settings WHERE id > ?", [m.appSettings]);
   await conn.query("DELETE FROM bill_sequences WHERE id > ?", [m.billSequences]);
 
+  const [curSeqs] = await conn.query("SELECT id, next_seq FROM bill_sequences");
+  const curSeqMap = new Map((curSeqs as Array<{ id: number; next_seq: number }>).map((r) => [r.id, r.next_seq]));
   for (const seq of snap.sequences) {
-    await conn.query("UPDATE bill_sequences SET next_seq = ? WHERE id = ?", [seq.nextSeq, seq.id]);
+    if (curSeqMap.get(seq.id) !== seq.nextSeq) {
+      await conn.query("UPDATE bill_sequences SET next_seq = ? WHERE id = ?", [seq.nextSeq, seq.id]);
+    }
   }
+
+  const [curStaff] = await conn.query("SELECT id, password_hash, pin_hash FROM staff WHERE legacy_id IN ('5002', '101')");
+  const curStaffMap = new Map(
+    (curStaff as Array<{ id: number; password_hash: string; pin_hash: string | null }>).map((r) => [r.id, r]),
+  );
   for (const st of snap.staffCreds) {
-    await conn.query("UPDATE staff SET password_hash = ?, pin_hash = ? WHERE id = ?", [
-      st.passwordHash,
-      st.pinHash,
-      st.id,
-    ]);
+    const cur = curStaffMap.get(st.id);
+    if (!cur || cur.password_hash !== st.passwordHash || cur.pin_hash !== st.pinHash) {
+      await conn.query("UPDATE staff SET password_hash = ?, pin_hash = ? WHERE id = ?", [
+        st.passwordHash,
+        st.pinHash,
+        st.id,
+      ]);
+    }
   }
+
+  const [curSettings] = await conn.query("SELECT id, CAST(setting_value AS CHAR) AS setting_value FROM app_settings");
+  const curSettingsMap = new Map(
+    (curSettings as Array<{ id: number; setting_value: string }>).map((r) => [r.id, r.setting_value]),
+  );
   for (const s of snap.appSettingsRows) {
-    await conn.query("UPDATE app_settings SET setting_value = CAST(? AS JSON) WHERE id = ?", [
-      s.settingValue,
-      s.id,
-    ]);
+    if (curSettingsMap.get(s.id) !== s.settingValue) {
+      await conn.query("UPDATE app_settings SET setting_value = CAST(? AS JSON) WHERE id = ?", [
+        s.settingValue,
+        s.id,
+      ]);
+    }
   }
 
   // Restore any modified existing products, customers, member_cards, suppliers, or stock balances

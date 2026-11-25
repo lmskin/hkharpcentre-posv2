@@ -32,6 +32,7 @@ export const customers = mysqlTable(
     nameEn: varchar("name_en", { length: 160 }).notNull().default(""),
     phone: varchar("phone", { length: 40 }).notNull().default(""),
     email: varchar("email", { length: 160 }).notNull().default(""),
+    address: varchar("address", { length: 300 }).notNull().default(""),
     pointsBalance: int("points_balance").notNull().default(0),
     active: boolean("active").notNull().default(true),
     createdAt: datetime("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),

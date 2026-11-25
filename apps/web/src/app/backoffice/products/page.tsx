@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { formatHkd } from "@hkharp/domain/money";
+import { AutoSuggestInput } from "@/components/AutoSuggestInput";
 
 interface ProductRow {
   id: number;
@@ -141,8 +142,13 @@ export default function ProductsBackOfficePage() {
                   </option>
                 ))}
               </select>
-              <input
+              <AutoSuggestInput
+                theme="modern"
                 type="search"
+                name="productCatalogSearch"
+                autoComplete="on"
+                suggestKind="product"
+                historyKey="bo_prod_search"
                 value={q}
                 onChange={(e) => {
                   setQ(e.target.value);
@@ -230,7 +236,13 @@ export default function ProductsBackOfficePage() {
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block font-medium text-slate-600">SKU / Barcode</label>
-                <input
+                <AutoSuggestInput
+                  theme="modern"
+                  name="productBarcode"
+                  autoComplete="on"
+                  suggestKind="product"
+                  valueField="sku"
+                  historyKey="bo_prod_sku"
                   value={barcode}
                   onChange={(e) => setBarcode(e.target.value)}
                   className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 font-mono"
@@ -239,7 +251,13 @@ export default function ProductsBackOfficePage() {
               </div>
               <div>
                 <label className="block font-medium text-slate-600">UBC (廠方碼)</label>
-                <input
+                <AutoSuggestInput
+                  theme="modern"
+                  name="productUbc"
+                  autoComplete="on"
+                  suggestKind="product"
+                  valueField="ubc"
+                  historyKey="bo_prod_ubc"
                   value={ubc}
                   onChange={(e) => setUbc(e.target.value)}
                   className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5 font-mono"
@@ -248,7 +266,13 @@ export default function ProductsBackOfficePage() {
             </div>
             <div>
               <label className="block font-medium text-slate-600">Chinese Name</label>
-              <input
+              <AutoSuggestInput
+                theme="modern"
+                name="productNameZh"
+                autoComplete="on"
+                suggestKind="product"
+                valueField="nameZh"
+                historyKey="bo_prod_namezh"
                 value={nameZh}
                 onChange={(e) => setNameZh(e.target.value)}
                 className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"
@@ -257,7 +281,13 @@ export default function ProductsBackOfficePage() {
             </div>
             <div>
               <label className="block font-medium text-slate-600">English Name</label>
-              <input
+              <AutoSuggestInput
+                theme="modern"
+                name="productNameEn"
+                autoComplete="on"
+                suggestKind="product"
+                valueField="nameEn"
+                historyKey="bo_prod_nameen"
                 value={nameEn}
                 onChange={(e) => setNameEn(e.target.value)}
                 className="mt-1 w-full rounded border border-slate-300 px-2.5 py-1.5"

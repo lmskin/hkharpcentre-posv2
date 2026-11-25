@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { AutoSuggestInput } from "@/components/AutoSuggestInput";
 import {
   currentBusinessDate,
   downloadCsvFile,
@@ -175,7 +176,12 @@ export function StockValueView({
             </option>
           ))}
         </select>
-        <input
+        <AutoSuggestInput
+          theme="legacy"
+          name="reportStockValSearch"
+          autoComplete="on"
+          suggestKind="product"
+          historyKey="report_stockval_q"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜尋條碼 / 貨碼 / 貨品"
@@ -473,7 +479,12 @@ export function StockMovementMatrixView({
             </option>
           ))}
         </select>
-        <input
+        <AutoSuggestInput
+          theme="legacy"
+          name="reportMovementSearch"
+          autoComplete="on"
+          suggestKind="product"
+          historyKey="report_mov_q"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜尋條碼 / 貨品"
@@ -779,7 +790,12 @@ export function CheckLedgerView({ shopLabel = "Central(1)" }: { shopLabel?: stri
             <option value="CHEQUE">CHEQUE 支票</option>
           </select>
         )}
-        <input
+        <AutoSuggestInput
+          theme="legacy"
+          name="reportLedgerSearch"
+          autoComplete="on"
+          suggestKind="invoice"
+          historyKey="report_ledger_q"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜尋單號 / 客戶 / 條碼 / 參考號"
@@ -1346,7 +1362,12 @@ export function OtherTxnReportView({ shopLabel = "Central(1)" }: { shopLabel?: s
             <option value="STOCKTAKE">XC=93 盤點單 (STK)</option>
           </select>
         ) : null}
-        <input
+        <AutoSuggestInput
+          theme="legacy"
+          name="reportOtherTxnSearch"
+          autoComplete="on"
+          suggestKind={subView === "stocktake" ? "product" : "supplier"}
+          historyKey={`report_office_${subView}`}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜尋單號 / 條碼 / 供應商"

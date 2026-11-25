@@ -8,6 +8,8 @@ const UpsertProductSchema = z.object({
   ubc: z.string().trim().max(40).optional(),
   nameZh: z.string().trim().min(1).max(200),
   nameEn: z.string().trim().max(200).default(""),
+  colorName: z.string().trim().max(80).optional(),
+  sizeName: z.string().trim().max(80).optional(),
   legacyC1: z.number().int().min(0).max(999),
   sellPriceHkd: z.number().nonnegative(),
   fixedPriceHkd: z.number().nonnegative().nullable().optional(),

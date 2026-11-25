@@ -90,19 +90,30 @@ describe("@hkharp/db auth & ACID transactions", () => {
       } catch {
         db = null;
       }
-    });
+    }, 30_000);
 
     afterAll(async () => {
       if (db) {
-        for (const invNo of createdInvoices) {
+        const leftoverRows = await db.select().from(bills).where(eq(bills.notes, "Vitest AR flow check"));
+        const allTargetNos = Array.from(
+          new Set([...createdInvoices, ...leftoverRows.map((row) => row.invoiceNo)]),
+        );
+        for (const invNo of allTargetNos) {
           const [billRow] = await db.select().from(bills).where(eq(bills.invoiceNo, invNo)).limit(1);
           if (billRow) {
+            if (billRow.status !== "cancelled" && testStaffId) {
+              await voidBillTx(db, {
+                invoiceNo: invNo,
+                staffId: testStaffId,
+                reason: "Vitest cleanup reversal",
+              }).catch(() => {});
+            }
             await db.delete(stockMovements).where(eq(stockMovements.billId, billRow.id));
             await db.delete(auditLogs).where(eq(auditLogs.entityId, invNo));
             await db.delete(bills).where(eq(bills.id, billRow.id));
           }
         }
-        if (createdInvoices.length > 0) {
+        if (allTargetNos.length > 0) {
           const seqRows = await db
             .select()
             .from(billSequences)
@@ -117,13 +128,13 @@ describe("@hkharp/db auth & ACID transactions", () => {
           if (seqRows[0] && seqRows[0].nextSeq > 20001) {
             await db
               .update(billSequences)
-              .set({ nextSeq: seqRows[0].nextSeq - createdInvoices.length })
+              .set({ nextSeq: Math.max(20001, seqRows[0].nextSeq - allTargetNos.length) })
               .where(eq(billSequences.id, seqRows[0].id));
           }
         }
       }
       if (pool) await pool.end();
-    });
+    }, 30_000);
 
     it("creates unpaid invoice -> settles via Bank Transfer (PM=5) -> voids cleanly", async () => {
       if (!db || !testStaffId) return;
@@ -178,6 +189,6 @@ describe("@hkharp/db auth & ACID transactions", () => {
         reason: "Vitest cleanup reversal",
       });
       expect(voided.status).toBe("cancelled");
-    });
+    }, 30_000);
   });
 });

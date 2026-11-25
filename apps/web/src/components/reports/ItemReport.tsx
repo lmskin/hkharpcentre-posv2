@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { AutoSuggestInput } from "@/components/AutoSuggestInput";
 import {
   currentBusinessDate,
   downloadCsvFile,
@@ -184,7 +185,12 @@ export function ItemReportPanel({
           ))}
         </select>
       </label>
-      <input
+      <AutoSuggestInput
+        theme="legacy"
+        name="reportItemSearch"
+        autoComplete="on"
+        suggestKind="product"
+        historyKey="report_item_q"
         value={q}
         onChange={(e) => setQ(e.target.value)}
         placeholder="搜尋條碼 / 貨碼 / 貨品"

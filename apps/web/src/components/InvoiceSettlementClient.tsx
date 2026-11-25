@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { formatHkd } from "@hkharp/domain/money";
+import { AutoSuggestInput } from "@/components/AutoSuggestInput";
 
 export interface InvoiceListItem {
   invoiceNo: string;
@@ -132,8 +133,13 @@ export function InvoiceSettlementClient({
                 </button>
               ))}
             </div>
-            <input
+            <AutoSuggestInput
+              theme="modern"
               type="search"
+              name="invoiceSearch"
+              autoComplete="on"
+              suggestKind="invoice"
+              historyKey="ar_search"
               value={searchQ}
               onChange={(e) => void refreshList(statusFilter, e.target.value)}
               placeholder="Search invoice # or notes..."
@@ -244,7 +250,12 @@ export function InvoiceSettlementClient({
                 <label className="block text-xs font-medium text-slate-600">
                   Bank Transfer Ref / Cheque No.
                 </label>
-                <input
+                <AutoSuggestInput
+                  theme="modern"
+                  name="referenceNo"
+                  autoComplete="on"
+                  suggestKind="payment_ref"
+                  historyKey="ar_ref"
                   value={referenceNo}
                   onChange={(e) => setReferenceNo(e.target.value)}
                   placeholder="e.g. HSBC-TT-20261121-001"
