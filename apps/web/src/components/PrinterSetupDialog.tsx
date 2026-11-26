@@ -154,6 +154,7 @@ export function PrinterSetupDialog({ onClose }: { onClose: () => void }) {
   const [config, setConfig] = useState<Config>(DEFAULT_CONFIG);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     fetch("/api/settings/printers")
@@ -171,7 +172,8 @@ export function PrinterSetupDialog({ onClose }: { onClose: () => void }) {
           });
         }
       })
-      .catch((error) => setMessage(error instanceof Error ? error.message : "讀取印表機設定失敗"));
+      .catch((error) => setMessage(error instanceof Error ? error.message : "讀取印表機設定失敗"))
+      .finally(() => setLoading(false));
   }, []);
 
   function updateGridRow(rowKey: LegacyRowKey, patch: Partial<LegacyGridRow>) {
@@ -433,6 +435,10 @@ export function PrinterSetupDialog({ onClose }: { onClose: () => void }) {
 
         {/* Tab Body */}
         <div className="mx-2 mb-2 border border-t-0 border-[#aca899] bg-[#f7f7f5] p-3 text-[12px]">
+          {loading ? (
+            <div className="py-12 text-center text-[12px] text-[#555]">讀取印表機設定中…</div>
+          ) : (
+            <>
           {tab === "printers" ? (
             <div>
               <div className="mb-1 grid grid-cols-[72px_1fr_1fr_76px] gap-2 text-center text-[15px]">
@@ -839,6 +845,8 @@ export function PrinterSetupDialog({ onClose }: { onClose: () => void }) {
               </div>
             </div>
           ) : null}
+            </>
+          )}
 
           {message ? <div className="mt-2 border border-[#aca899] bg-[#ffffe1] p-1.5 text-[12px]">營運通訊息 - 000：{message}</div> : null}
         </div>
@@ -862,7 +870,7 @@ export function PrinterSetupDialog({ onClose }: { onClose: () => void }) {
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || loading}
             onClick={() => void save()}
             className="border border-[#7f9db9] bg-[#f0f0f0] px-7 py-1 hover:bg-[#e5e1d5] disabled:opacity-40"
           >

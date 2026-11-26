@@ -110,6 +110,8 @@ export const deliveryOrders = mysqlTable("delivery_orders", {
     .references(() => bills.id, { onDelete: "cascade" }),
   legacyOrl: varchar("legacy_orl", { length: 32 }),
   scheduledDate: datetime("scheduled_date"),
+  recipientPhone: varchar("recipient_phone", { length: 60 }).notNull().default(""),
+  deliveryAddress: varchar("delivery_address", { length: 500 }).notNull().default(""),
   deliveryStatus: varchar("delivery_status", { length: 24 }).notNull().default("pending"),
   remarks: varchar("remarks", { length: 255 }),
 });

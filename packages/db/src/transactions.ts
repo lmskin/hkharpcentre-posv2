@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import type { BillDocType, RecordPaymentInput } from "@hkharp/contracts";
+import type { BillDocType, RecordPaymentInput, TenderCode } from "@hkharp/contracts";
 import {
   calculateBillTotals,
   calculateCrmPoints,
@@ -94,8 +94,15 @@ export interface CreateBillOrInvoiceTxInput {
   actorStaffId?: number;
   docType: BillDocType;
   status?: "completed" | "held";
+  amendInvoiceNo?: string;
   supersedeInvoiceNo?: string;
   createDeliveryOrder?: boolean;
+  deliveryInfo?: {
+    scheduledDate?: string;
+    recipientPhone?: string;
+    deliveryAddress?: string;
+    remarks?: string;
+  };
   businessDateOverride?: string;
   sourceTable?: "POS_V2" | "OfficeXHeader";
   legacySc?: string | null;
@@ -139,6 +146,10 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
       balanceDueHkd: Number(b.balanceDue),
       issuedAtIso: b.issuedAt.toISOString(),
     };
+  }
+
+  if (input.amendInvoiceNo) {
+    return amendBillOrInvoiceInPlaceTx(db, input);
   }
 
   const now = new Date();
@@ -351,10 +362,20 @@ export async function createBillOrInvoiceTx(db: HarpDb, input: CreateBillOrInvoi
     }
 
     if (input.createDeliveryOrder) {
+      const scheduledDate =
+        input.deliveryInfo?.scheduledDate && /^\d{4}-\d{2}-\d{2}$/.test(input.deliveryInfo.scheduledDate)
+          ? new Date(`${input.deliveryInfo.scheduledDate}T00:00:00+08:00`)
+          : null;
       await tx.insert(deliveryOrders).values({
         billId,
+        scheduledDate,
+        recipientPhone: (input.deliveryInfo?.recipientPhone ?? "").trim().slice(0, 60),
+        deliveryAddress: (input.deliveryInfo?.deliveryAddress ?? "").trim().slice(0, 500),
         deliveryStatus: "pending",
-        remarks: input.notes ? input.notes.slice(0, 255) : null,
+        remarks:
+          (input.deliveryInfo?.remarks ?? (input.notes ? input.notes.slice(0, 255) : ""))
+            .trim()
+            .slice(0, 255) || null,
       });
     }
 
@@ -648,6 +669,603 @@ export async function settleInvoiceArTx(
       balanceDueHkd: updatedState.balanceDueHkd,
       paidAtIso: updatedState.paidAtIso,
     };
+  });
+}
+
+function parseScheduledDate(raw?: string): Date | null {
+  if (!raw || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  return new Date(`${raw}T00:00:00+08:00`);
+}
+
+export async function amendBillOrInvoiceInPlaceTx(db: HarpDb, input: CreateBillOrInvoiceTxInput) {
+  const targetNo = input.amendInvoiceNo?.trim();
+  if (!targetNo) throw new Error("amendInvoiceNo is required");
+
+  const now = new Date();
+  const isHeld = input.status === "held";
+  const { xc, xt, sd } = prefixForDocType(input.docType);
+
+  return db.transaction(async (tx) => {
+    const lockedBills = await tx
+      .select()
+      .from(bills)
+      .where(eq(bills.invoiceNo, targetNo))
+      .for("update");
+    if (lockedBills.length === 0) {
+      throw new Error(`Original bill ${targetNo} not found for amendment`);
+    }
+    const oldBill = lockedBills[0]!;
+    if (oldBill.status === "sealed") {
+      throw new Error(`Bill ${oldBill.invoiceNo} is sealed by day-end`);
+    }
+    if (oldBill.status === "cancelled") {
+      throw new Error(`Bill ${oldBill.invoiceNo} is cancelled and cannot be amended`);
+    }
+    const closedBatch = await tx
+      .select({ id: dayEndBatches.id })
+      .from(dayEndBatches)
+      .where(
+        and(
+          eq(dayEndBatches.shopId, oldBill.shopId),
+          eq(dayEndBatches.businessDate, oldBill.businessDate),
+          eq(dayEndBatches.closed, true),
+        ),
+      )
+      .limit(1);
+    if (closedBatch.length > 0) {
+      throw new Error(`Business date ${oldBill.businessDate} is sealed by day-end`);
+    }
+
+    const wasHeld = oldBill.status === "held";
+    if (!wasHeld && !NO_STOCK_DOC_TYPES.includes(oldBill.docType as BillDocType)) {
+      const oldLines = await tx.select().from(billLines).where(eq(billLines.billId, oldBill.id));
+      for (const l of oldLines) {
+        if (!l.productId || l.cancelled) continue;
+        const delta = calculateVoidStockDelta(oldBill.docType, Number(l.quantity)).toFixed(4);
+        await tx
+          .update(stockBalances)
+          .set({ onHandQty: sql`${stockBalances.onHandQty} + ${delta}` })
+          .where(and(eq(stockBalances.shopId, oldBill.shopId), eq(stockBalances.productId, l.productId)));
+        await tx.insert(stockMovements).values({
+          shopId: oldBill.shopId,
+          productId: l.productId,
+          billId: oldBill.id,
+          movementType: "AMEND_REVERSAL",
+          onHandDelta: delta,
+          unitCost: l.unitPrice,
+          movingAvgCostAfter: l.unitPrice,
+        });
+      }
+    }
+
+    if (!wasHeld && oldBill.customerId) {
+      const ledgerEntries = await tx
+        .select()
+        .from(crmPointLedger)
+        .where(eq(crmPointLedger.billId, oldBill.id));
+      const netOldDelta = ledgerEntries.reduce((acc, r) => acc + r.deltaPoints, 0);
+      if (netOldDelta !== 0) {
+        await tx.insert(crmPointLedger).values({
+          customerId: oldBill.customerId,
+          billId: oldBill.id,
+          deltaPoints: -netOldDelta,
+          reason: `In-place amend reversal for ${oldBill.invoiceNo}`,
+        });
+        await tx
+          .update(customers)
+          .set({ pointsBalance: sql`${customers.pointsBalance} - ${netOldDelta}` })
+          .where(eq(customers.id, oldBill.customerId));
+      }
+    }
+
+    const totals = calculateBillTotals(
+      input.lines.map((l, idx) => ({
+        sku: l.sku,
+        quantity: l.quantity,
+        unitPriceHkd: l.unitPriceHkd,
+        discountRate: l.discountRate ?? 0,
+        lineDiscountAmountHkd: l.lineDiscountAmountHkd ?? 0,
+        dk: idx + 1,
+      })),
+    );
+
+    let customerPoints = 0;
+    if (input.customerId) {
+      const custRows = await tx
+        .select({ id: customers.id, pointsBalance: customers.pointsBalance })
+        .from(customers)
+        .where(eq(customers.id, input.customerId))
+        .for("update");
+      if (custRows.length === 0) {
+        throw new Error(`Customer #${input.customerId} not found`);
+      }
+      customerPoints = custRows[0]!.pointsBalance;
+    }
+
+    const crm = calculateCrmPoints(
+      input.lines.map((l, idx) => ({
+        sku: l.sku,
+        categoryC1: l.categoryC1,
+        quantity: l.quantity,
+        lineNetAmountHkd: totals.lines[idx]?.netHkd ?? 0,
+        excludeFromCrmBonus: l.excludeFromCrmBonus,
+      })),
+      customerPoints,
+    );
+
+    if (!isHeld && input.customerId && !crm.redemptionAllowed) {
+      throw new Error(crm.redemptionError ?? "Insufficient CRM points");
+    }
+
+    const existingPmts = await tx
+      .select({ amount: billPayments.amount })
+      .from(billPayments)
+      .where(and(eq(billPayments.billId, oldBill.id), eq(billPayments.voided, false)));
+    const existingPaidHkd = roundToCents(existingPmts.reduce((acc, p) => acc + Number(p.amount), 0));
+
+    let newlyPaidHkd = 0;
+    if (!isHeld && input.initialPayments.length > 0) {
+      const pmRows = await tx.select().from(payMethods);
+      const pmIdByCode = new Map(pmRows.map((p) => [p.code, p.id]));
+      for (let i = 0; i < input.initialPayments.length; i++) {
+        const rawPmt = input.initialPayments[i]!;
+        const remainingBefore = Math.max(0, roundToCents(totals.netAmountHkd - existingPaidHkd - newlyPaidHkd));
+        const appliedAmt = roundToCents(Math.min(rawPmt.amountHkd, remainingBefore > 0 ? remainingBefore : rawPmt.amountHkd));
+        if (appliedAmt <= 0) continue;
+
+        const payMethodId = pmIdByCode.get(rawPmt.tenderCode);
+        if (!payMethodId) {
+          throw new Error(`Unsupported tender code: ${rawPmt.tenderCode}`);
+        }
+        const paidDateObj = rawPmt.paidAtIso ? new Date(rawPmt.paidAtIso) : now;
+        const pmtBusinessDate = rawPmt.paidAtIso ? formatHktBusinessDate(paidDateObj) : oldBill.businessDate;
+
+        const pmtRes = await tx.insert(billPayments).values({
+          billId: oldBill.id,
+          payMethodId,
+          clientIdempotencyKey: `${rawPmt.clientIdempotencyKey}#amend#${i}`,
+          staffId: input.actorStaffId ?? input.staffId,
+          tenderCode: rawPmt.tenderCode,
+          amount: appliedAmt.toFixed(4),
+          tipsAmount: "0.0000",
+          paidAt: paidDateObj,
+          businessDate: pmtBusinessDate,
+          approvalCode: rawPmt.approvalCode ?? null,
+          cardLast4: rawPmt.cardLast4 ?? null,
+          maskedPan: rawPmt.cardLast4 ? `************${rawPmt.cardLast4}` : null,
+          referenceNo: rawPmt.referenceNo ?? null,
+          remarks: rawPmt.remarks ?? null,
+          voided: false,
+        });
+        const billPaymentId = Number(pmtRes[0].insertId);
+        newlyPaidHkd = roundToCents(newlyPaidHkd + appliedAmt);
+
+        if (rawPmt.tenderCode === "OCTOPUS" && rawPmt.octopusCardId) {
+          await tx.insert(octopusTransactions).values({
+            billId: oldBill.id,
+            billPaymentId,
+            shopId: oldBill.shopId,
+            terminalId: oldBill.terminalId,
+            requestId: `${input.clientIdempotencyKey}-octo-${i}`,
+            cardId: rawPmt.octopusCardId,
+            deviceId: rawPmt.octopusDeviceId ?? "RWL-01",
+            amountCents: Math.round(appliedAmt * 100),
+            remainingValueCents:
+              rawPmt.octopusRemainingHkd !== undefined ? Math.round(rawPmt.octopusRemainingHkd * 100) : null,
+            resultCode: 0,
+            incomplete100022Recovered: false,
+            transactedAt: paidDateObj,
+          });
+        }
+      }
+    }
+
+    const totalPaidHkd = roundToCents(existingPaidHkd + newlyPaidHkd);
+    let balanceDueHkd = Math.max(0, roundToCents(totals.netAmountHkd - totalPaidHkd));
+    let nextPaymentStatus: "unpaid" | "partial" | "paid" =
+      balanceDueHkd <= 0.005 ? "paid" : totalPaidHkd > 0 ? "partial" : "unpaid";
+
+    if (isHeld) {
+      nextPaymentStatus = totalPaidHkd > 0 ? "partial" : "unpaid";
+    } else if (OFFICE_ONLY_DOC_TYPES.includes(input.docType)) {
+      nextPaymentStatus = "paid";
+      balanceDueHkd = 0;
+    }
+
+    const skus = Array.from(new Set(input.lines.map((l) => l.sku)));
+    const prodMap = new Map<string, { id: number; avgCost: string }>();
+    if (skus.length > 0) {
+      const prodRows = await tx
+        .select({ id: products.id, barcode: products.barcode, avgCost: products.avgCost })
+        .from(products)
+        .where(and(eq(products.shopId, oldBill.shopId), inArray(products.barcode, skus)))
+        .catch(async () => [] as Array<{ id: number; barcode: string; avgCost: string }>);
+
+      const fallbackRows =
+        prodRows.length > 0
+          ? prodRows
+          : await tx
+              .select({ id: products.id, barcode: products.barcode, avgCost: products.avgCost })
+              .from(products)
+              .where(inArray(products.barcode, skus));
+
+      for (const p of fallbackRows) {
+        if (!prodMap.has(p.barcode)) prodMap.set(p.barcode, { id: p.id, avgCost: p.avgCost });
+      }
+    }
+
+    await tx.delete(billLines).where(eq(billLines.billId, oldBill.id));
+    await tx.insert(billLines).values(
+      input.lines.map((l, idx) => {
+        const lineCalc = totals.lines[idx]!;
+        const prod = prodMap.get(l.sku);
+        return {
+          billId: oldBill.id,
+          lineNo: idx + 1,
+          productId: prod?.id ?? null,
+          sku: l.sku,
+          nameZh: l.nameZh.slice(0, 200),
+          nameEn: (l.nameEn ?? "").slice(0, 200),
+          categoryC1: l.categoryC1,
+          legacyDk: idx + 1,
+          quantity: (input.docType === "STOCK_ADJUSTMENT" ? (l.stockQuantity ?? l.quantity) : l.quantity).toFixed(4),
+          unitPrice: l.unitPriceHkd.toFixed(4),
+          discountRate: (l.discountRate ?? 0).toFixed(6),
+          lineDiscountAmount: (l.lineDiscountAmountHkd ?? 0).toFixed(4),
+          lineTotal: lineCalc.netHkd.toFixed(4),
+          cancelled: false,
+          isModifier: false,
+          notes: (l.notes ?? "").trim().slice(0, 300),
+          serialNo: (l.serialNo ?? "").trim().slice(0, 80),
+        };
+      }),
+    );
+
+    const nextBillStatus = isHeld ? ("held" as const) : ("completed" as const);
+    await tx
+      .update(bills)
+      .set({
+        clientIdempotencyKey: input.clientIdempotencyKey,
+        staffId: input.staffId,
+        customerId: input.customerId ?? null,
+        docType: input.docType,
+        legacyXc: xc,
+        legacyXt: xt,
+        legacySd: sd,
+        status: nextBillStatus,
+        paymentStatus: nextPaymentStatus,
+        grossAmount: totals.grossAmountHkd.toFixed(4),
+        discountAmount: totals.discountAmountHkd.toFixed(4),
+        netAmount: totals.netAmountHkd.toFixed(4),
+        paidAmount: totalPaidHkd.toFixed(4),
+        balanceDue: balanceDueHkd.toFixed(4),
+        paidAt: !isHeld && nextPaymentStatus === "paid" ? oldBill.paidAt ?? now : null,
+        notes: input.notes ?? oldBill.notes ?? null,
+      })
+      .where(eq(bills.id, oldBill.id));
+
+    if (input.createDeliveryOrder) {
+      const existingDelivery = await tx
+        .select()
+        .from(deliveryOrders)
+        .where(eq(deliveryOrders.billId, oldBill.id))
+        .limit(1);
+      const scheduledDate = parseScheduledDate(input.deliveryInfo?.scheduledDate);
+      const phone = (input.deliveryInfo?.recipientPhone ?? "").trim().slice(0, 60);
+      const addr = (input.deliveryInfo?.deliveryAddress ?? "").trim().slice(0, 500);
+      const dlyRemarks =
+        (input.deliveryInfo?.remarks ?? (input.notes ? input.notes.slice(0, 255) : ""))
+          .trim()
+          .slice(0, 255) || null;
+      if (existingDelivery[0]) {
+        await tx
+          .update(deliveryOrders)
+          .set({
+            scheduledDate: scheduledDate ?? existingDelivery[0].scheduledDate,
+            recipientPhone: input.deliveryInfo?.recipientPhone !== undefined ? phone : existingDelivery[0].recipientPhone,
+            deliveryAddress: input.deliveryInfo?.deliveryAddress !== undefined ? addr : existingDelivery[0].deliveryAddress,
+            remarks: dlyRemarks ?? existingDelivery[0].remarks,
+          })
+          .where(eq(deliveryOrders.id, existingDelivery[0].id));
+      } else {
+        await tx.insert(deliveryOrders).values({
+          billId: oldBill.id,
+          scheduledDate,
+          recipientPhone: phone,
+          deliveryAddress: addr,
+          deliveryStatus: "pending",
+          remarks: dlyRemarks,
+        });
+      }
+    }
+
+    if (!isHeld) {
+      if (input.customerId && crm.netPointDelta !== 0) {
+        await tx.insert(crmPointLedger).values({
+          customerId: input.customerId,
+          billId: oldBill.id,
+          ruleRid: crm.redeemedPoints > 0 ? 3 : 1,
+          deltaPoints: crm.netPointDelta,
+          reason: `Bill ${oldBill.invoiceNo} amended (earn +${crm.earnedPoints}, redeem -${crm.redeemedPoints})`,
+        });
+        await tx
+          .update(customers)
+          .set({ pointsBalance: sql`${customers.pointsBalance} + ${crm.netPointDelta}` })
+          .where(eq(customers.id, input.customerId));
+      }
+
+      if (!NO_STOCK_DOC_TYPES.includes(input.docType)) {
+        for (const l of input.lines) {
+          const prod = prodMap.get(l.sku);
+          if (!prod) continue;
+          let sign = -1;
+          let moveType = "SALE";
+          if (input.docType === "SALES_RETURN") { sign = 1; moveType = "RETURN"; }
+          else if (input.docType === "GOODS_RECEIPT") { sign = 1; moveType = "PURCHASE_IN"; }
+          else if (input.docType === "PURCHASE_RETURN") { sign = -1; moveType = "PURCHASE_RETURN"; }
+          else if (input.docType === "STOCK_TRANSFER_OUT") { sign = -1; moveType = "TRANSFER_OUT"; }
+          else if (input.docType === "STOCK_TRANSFER_IN") { sign = 1; moveType = "TRANSFER_IN"; }
+          else if (input.docType === "WRITE_OFF") { sign = -1; moveType = "WRITE_OFF"; }
+          else if (input.docType === "STOCK_ADJUSTMENT") { sign = 1; moveType = "ADJUST"; }
+          else if (input.docType === "STOCKTAKE") { sign = 1; moveType = "STOCKTAKE"; }
+
+          const stockQuantity = l.stockQuantity ?? l.quantity;
+          const delta = sign * stockQuantity;
+          const balRows = await tx
+            .select()
+            .from(stockBalances)
+            .where(and(eq(stockBalances.shopId, oldBill.shopId), eq(stockBalances.productId, prod.id)))
+            .for("update");
+          const currentQty = Number(balRows[0]?.onHandQty ?? 0);
+          const currentCost = Number(balRows[0]?.movingAvgCost ?? prod.avgCost ?? 0);
+          const nextQty = currentQty + delta;
+          if (balRows.length === 0) {
+            await tx.insert(stockBalances).values({
+              shopId: oldBill.shopId,
+              productId: prod.id,
+              onHandQty: nextQty.toFixed(4),
+              movingAvgCost: currentCost.toFixed(4),
+            });
+          } else {
+            await tx
+              .update(stockBalances)
+              .set({ onHandQty: nextQty.toFixed(4), updatedAt: now })
+              .where(eq(stockBalances.id, balRows[0]!.id));
+          }
+          await tx.insert(stockMovements).values({
+            shopId: oldBill.shopId,
+            productId: prod.id,
+            billId: oldBill.id,
+            movementType: moveType,
+            legacyXc: xc,
+            onHandDelta: delta.toFixed(4),
+            unitCost: currentCost.toFixed(4),
+            movingAvgCostAfter: currentCost.toFixed(4),
+          });
+        }
+      }
+    }
+
+    await tx.insert(auditLogs).values({
+      shopId: oldBill.shopId,
+      staffId: input.actorStaffId ?? input.staffId,
+      action: "AMEND_BILL_IN_PLACE",
+      entityType: "bills",
+      entityId: oldBill.invoiceNo,
+      details: {
+        status: nextBillStatus,
+        paymentStatus: nextPaymentStatus,
+        netAmountHkd: totals.netAmountHkd,
+        existingPaidHkd,
+        newlyPaidHkd,
+        totalPaidHkd,
+        balanceDueHkd,
+      },
+    });
+
+    return {
+      idempotentReplay: false,
+      billId: oldBill.id,
+      invoiceNo: oldBill.invoiceNo,
+      docType: input.docType,
+      status: nextBillStatus,
+      paymentStatus: nextPaymentStatus,
+      netAmountHkd: totals.netAmountHkd,
+      paidAmountHkd: totalPaidHkd,
+      balanceDueHkd,
+      issuedAtIso: oldBill.issuedAt.toISOString(),
+    };
+  });
+}
+
+async function recalculateBillPaymentTotalsInTx(
+  tx: DbTransaction,
+  bill: typeof bills.$inferSelect,
+  now: Date,
+) {
+  const activePmts = await tx
+    .select({ amount: billPayments.amount, paidAt: billPayments.paidAt })
+    .from(billPayments)
+    .where(and(eq(billPayments.billId, bill.id), eq(billPayments.voided, false)));
+
+  const paidAmountHkd = roundToCents(activePmts.reduce((sum, p) => sum + Number(p.amount), 0));
+  const netHkd = Number(bill.netAmount);
+  const balanceDueHkd = Math.max(0, roundToCents(netHkd - paidAmountHkd));
+  const paymentStatus: "unpaid" | "partial" | "paid" =
+    balanceDueHkd <= 0.005 ? "paid" : paidAmountHkd > 0 ? "partial" : "unpaid";
+
+  await tx
+    .update(bills)
+    .set({
+      paymentStatus,
+      paidAmount: paidAmountHkd.toFixed(4),
+      balanceDue: balanceDueHkd.toFixed(4),
+      paidAt: paymentStatus === "paid" ? bill.paidAt ?? now : null,
+    })
+    .where(eq(bills.id, bill.id));
+
+  return { paymentStatus, paidAmountHkd, balanceDueHkd };
+}
+
+export async function updateInvoicePaymentTx(
+  db: HarpDb,
+  input: {
+    invoiceNo: string;
+    paymentId: number;
+    staffId: number;
+    tenderCode: TenderCode;
+    amountHkd: number;
+    remarks?: string;
+    referenceNo?: string;
+    approvalCode?: string;
+    cardLast4?: string;
+  },
+) {
+  const now = new Date();
+  return db.transaction(async (tx) => {
+    const lockedBills = await tx
+      .select()
+      .from(bills)
+      .where(eq(bills.invoiceNo, input.invoiceNo))
+      .for("update");
+    if (lockedBills.length === 0) throw new Error(`Invoice ${input.invoiceNo} not found`);
+    const bill = lockedBills[0]!;
+    if (bill.status === "sealed") throw new Error(`Bill ${bill.invoiceNo} is sealed by day-end`);
+    if (bill.status === "cancelled") throw new Error(`Bill ${bill.invoiceNo} is cancelled`);
+    const closedBatch = await tx
+      .select({ id: dayEndBatches.id })
+      .from(dayEndBatches)
+      .where(
+        and(
+          eq(dayEndBatches.shopId, bill.shopId),
+          eq(dayEndBatches.businessDate, bill.businessDate),
+          eq(dayEndBatches.closed, true),
+        ),
+      )
+      .limit(1);
+    if (closedBatch.length > 0) throw new Error(`Business date ${bill.businessDate} is sealed by day-end`);
+
+    const pmtRows = await tx
+      .select()
+      .from(billPayments)
+      .where(and(eq(billPayments.id, input.paymentId), eq(billPayments.billId, bill.id), eq(billPayments.voided, false)))
+      .limit(1);
+    if (pmtRows.length === 0) throw new Error(`Deposit payment #${input.paymentId} not found`);
+
+    const allActive = await tx
+      .select({ id: billPayments.id, amount: billPayments.amount })
+      .from(billPayments)
+      .where(and(eq(billPayments.billId, bill.id), eq(billPayments.voided, false)));
+    const otherPaid = roundToCents(
+      allActive.filter((p) => p.id !== input.paymentId).reduce((s, p) => s + Number(p.amount), 0),
+    );
+    const nextAmt = roundToCents(input.amountHkd);
+    if (!Number.isFinite(nextAmt) || nextAmt <= 0) {
+      throw new Error("Deposit amount must be positive");
+    }
+    if (otherPaid + nextAmt > Number(bill.netAmount) + 0.005) {
+      throw new Error(`Total paid cannot exceed net amount HK$${Number(bill.netAmount).toFixed(2)}`);
+    }
+
+    const [pmRow] = await tx.select().from(payMethods).where(eq(payMethods.code, input.tenderCode)).limit(1);
+    if (!pmRow) throw new Error(`Unsupported tender code ${input.tenderCode}`);
+
+    await tx
+      .update(billPayments)
+      .set({
+        payMethodId: pmRow.id,
+        tenderCode: input.tenderCode,
+        amount: nextAmt.toFixed(4),
+        remarks: input.remarks !== undefined ? input.remarks || null : pmtRows[0]!.remarks,
+        referenceNo: input.referenceNo !== undefined ? input.referenceNo || null : pmtRows[0]!.referenceNo,
+        approvalCode: input.approvalCode !== undefined ? input.approvalCode || null : pmtRows[0]!.approvalCode,
+        cardLast4: input.cardLast4 !== undefined ? input.cardLast4 || null : pmtRows[0]!.cardLast4,
+      })
+      .where(eq(billPayments.id, input.paymentId));
+
+    const totalsAfter = await recalculateBillPaymentTotalsInTx(tx, bill, now);
+    await tx.insert(auditLogs).values({
+      shopId: bill.shopId,
+      staffId: input.staffId,
+      action: "UPDATE_DEPOSIT_PAYMENT",
+      entityType: "bills",
+      entityId: bill.invoiceNo,
+      details: {
+        paymentId: input.paymentId,
+        oldTenderCode: pmtRows[0]!.tenderCode,
+        oldAmountHkd: Number(pmtRows[0]!.amount),
+        newTenderCode: input.tenderCode,
+        newAmountHkd: nextAmt,
+        ...totalsAfter,
+      },
+    });
+
+    return { ok: true, invoiceNo: bill.invoiceNo, ...totalsAfter };
+  });
+}
+
+export async function cancelInvoicePaymentTx(
+  db: HarpDb,
+  input: {
+    invoiceNo: string;
+    paymentId: number;
+    staffId: number;
+    reason?: string;
+  },
+) {
+  const now = new Date();
+  return db.transaction(async (tx) => {
+    const lockedBills = await tx
+      .select()
+      .from(bills)
+      .where(eq(bills.invoiceNo, input.invoiceNo))
+      .for("update");
+    if (lockedBills.length === 0) throw new Error(`Invoice ${input.invoiceNo} not found`);
+    const bill = lockedBills[0]!;
+    if (bill.status === "sealed") throw new Error(`Bill ${bill.invoiceNo} is sealed by day-end`);
+    if (bill.status === "cancelled") throw new Error(`Bill ${bill.invoiceNo} is cancelled`);
+    const closedBatch = await tx
+      .select({ id: dayEndBatches.id })
+      .from(dayEndBatches)
+      .where(
+        and(
+          eq(dayEndBatches.shopId, bill.shopId),
+          eq(dayEndBatches.businessDate, bill.businessDate),
+          eq(dayEndBatches.closed, true),
+        ),
+      )
+      .limit(1);
+    if (closedBatch.length > 0) throw new Error(`Business date ${bill.businessDate} is sealed by day-end`);
+
+    const pmtRows = await tx
+      .select()
+      .from(billPayments)
+      .where(and(eq(billPayments.id, input.paymentId), eq(billPayments.billId, bill.id), eq(billPayments.voided, false)))
+      .limit(1);
+    if (pmtRows.length === 0) throw new Error(`Deposit payment #${input.paymentId} not found`);
+
+    await tx
+      .update(billPayments)
+      .set({ voided: true, remarks: input.reason ? `Voided: ${input.reason}`.slice(0, 255) : pmtRows[0]!.remarks })
+      .where(eq(billPayments.id, input.paymentId));
+
+    const totalsAfter = await recalculateBillPaymentTotalsInTx(tx, bill, now);
+    await tx.insert(auditLogs).values({
+      shopId: bill.shopId,
+      staffId: input.staffId,
+      action: "CANCEL_DEPOSIT_PAYMENT",
+      entityType: "bills",
+      entityId: bill.invoiceNo,
+      details: {
+        paymentId: input.paymentId,
+        tenderCode: pmtRows[0]!.tenderCode,
+        cancelledAmountHkd: Number(pmtRows[0]!.amount),
+        reason: input.reason ?? null,
+        ...totalsAfter,
+      },
+    });
+
+    return { ok: true, invoiceNo: bill.invoiceNo, ...totalsAfter };
   });
 }
 

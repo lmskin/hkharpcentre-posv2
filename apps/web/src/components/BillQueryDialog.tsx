@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { formatHkd } from "@hkharp/domain/money";
 import { LegacyIcon } from "@/components/LegacyIcons";
 import { ReceiptPreview, type ReceiptDetail } from "@/components/ReceiptPreview";
+import { DepositPaymentDialog } from "@/components/DepositPaymentDialog";
+import { DeliverySetupDialog, getTodayHkt } from "@/components/DeliverySetupDialog";
 
 type QueryTab = "today" | "held" | "office" | "unprocessed";
 type InfoMode = "order" | "items" | "payments";
@@ -149,7 +152,7 @@ export function BillQueryDialog({
   onLoad,
 }: {
   onClose: () => void;
-  onLoad: (detail: ReceiptDetail, action: "modify" | "reorder") => void;
+  onLoad: (detail: ReceiptDetail, action: "modify" | "reorder" | "copy_new") => void;
 }) {
   const router = useRouter();
   const hkToday = useMemo(() => getHkToday(), []);
@@ -221,6 +224,8 @@ export function BillQueryDialog({
     remarks: string;
   } | null>(null);
   const [receiveAllConfirmOpen, setReceiveAllConfirmOpen] = useState(false);
+  const [showDepositDialog, setShowDepositDialog] = useState(false);
+  const [showDeliverySetupDialog, setShowDeliverySetupDialog] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
 
@@ -1399,6 +1404,14 @@ export function BillQueryDialog({
               >
                 修改
               </button>
+              <button
+                type="button"
+                disabled={!detail}
+                onClick={() => setShowDeliverySetupDialog(true)}
+                className="h-10 border border-[#808080] bg-[#fff8dc] px-3 font-bold text-[#7c2d12] shadow-[inset_1px_1px_0_#fff] hover:bg-white disabled:opacity-40"
+              >
+                送貨設定
+              </button>
               <div className="flex-1" />
               <button
                 type="button"
@@ -1471,7 +1484,7 @@ export function BillQueryDialog({
                   加訂/提貨
                 </button>
                 {showReorderMenu && detail && (
-                  <div className="absolute bottom-11 left-0 z-30 flex w-44 flex-col border-2 border-[#0a246a] bg-[#ece9d8] p-1 shadow-xl">
+                  <div className="absolute bottom-11 left-0 z-30 flex w-48 flex-col border-2 border-[#0a246a] bg-[#ece9d8] p-1 shadow-xl">
                     <button
                       type="button"
                       onClick={() => {
@@ -1484,6 +1497,38 @@ export function BillQueryDialog({
                       !["CANCELLED", "VOIDED"].includes((detail.bill.status ?? "").toUpperCase())
                         ? "加訂 / 續付尾數"
                         : "加訂 (載入購物車)"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={["CANCELLED", "VOIDED"].includes((detail.bill.status ?? "").toUpperCase())}
+                      onClick={() => {
+                        setShowReorderMenu(false);
+                        setShowDepositDialog(true);
+                      }}
+                      className="px-2 py-1.5 text-left font-bold text-[#8b0000] hover:bg-[#316ac5] hover:text-white disabled:opacity-40"
+                    >
+                      落訂 / 改訂 / 取消訂
+                    </button>
+                    <button
+                      type="button"
+                      disabled={["CANCELLED", "VOIDED"].includes((detail.bill.status ?? "").toUpperCase())}
+                      onClick={() => {
+                        setShowReorderMenu(false);
+                        setShowDeliverySetupDialog(true);
+                      }}
+                      className="px-2 py-1.5 text-left font-bold text-[#7c2d12] hover:bg-[#316ac5] hover:text-white disabled:opacity-40"
+                    >
+                      送貨設定 (改期/改地址)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowReorderMenu(false);
+                        onLoad(detail, "copy_new");
+                      }}
+                      className="px-2 py-1.5 text-left font-bold text-[#333] hover:bg-[#316ac5] hover:text-white"
+                    >
+                      另開新單 / 分拆發票
                     </button>
                     <button
                       type="button"
@@ -1679,6 +1724,52 @@ export function BillQueryDialog({
           </div>
         </div>
       )}
+
+      {showDepositDialog && detail ? (
+        <DepositPaymentDialog
+          invoiceNo={detail.bill.invoiceNo}
+          initialDetail={detail}
+          onClose={() => setShowDepositDialog(false)}
+          onUpdated={(next) => {
+            setDetail(next);
+            void fetchList({ preserveDetailNo: next.bill.invoiceNo });
+          }}
+        />
+      ) : null}
+
+      {showDeliverySetupDialog && detail ? (
+        <DeliverySetupDialog
+          invoiceNo={detail.bill.invoiceNo}
+          initialInfo={{
+            enabled: true,
+            scheduledDate: detail.bill.delivery?.scheduledDate || getTodayHkt(),
+            recipientPhone: detail.bill.delivery?.recipientPhone || detail.bill.customer?.phone || "",
+            deliveryAddress: detail.bill.delivery?.deliveryAddress || detail.bill.customer?.address || "",
+            remarks: detail.bill.delivery?.remarks || "",
+          }}
+          customerPhone={detail.bill.customer?.phone}
+          customerAddress={detail.bill.customer?.address}
+          onClose={() => setShowDeliverySetupDialog(false)}
+          onSaved={() => {
+            setShowDeliverySetupDialog(false);
+            setStatusFeedback(`單據 ${detail.bill.invoiceNo} 送貨日期／地址已更新`);
+            void fetchList({ preserveDetailNo: detail.bill.invoiceNo });
+          }}
+        />
+      ) : null}
+
+      {typeof document !== "undefined" && detail
+        ? createPortal(
+            <div id="bill-query-print-sheet" className="hidden print:block">
+              <ReceiptPreview
+                detail={detail}
+                deliveryNoteMode={tab === "unprocessed"}
+                lang={previewLang}
+              />
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

@@ -35,6 +35,9 @@ import { LegacyReceiptReportView } from "@/components/LegacyReceiptReportView";
 import { LegacyStatsWorkspace } from "@/components/LegacyStatsWorkspace";
 import { QuickMemberModal } from "@/components/QuickMemberModal";
 import type { ReceiptDetail } from "@/components/ReceiptPreview";
+import { DepositPaymentDialog } from "@/components/DepositPaymentDialog";
+import { DeliverySetupDialog, getTodayHkt, type DeliveryDraftInfo } from "@/components/DeliverySetupDialog";
+import { allowNextUnload, setPosUnsavedWork } from "@/components/WindowCloseGuard";
 import { StockPanel } from "@/components/StockPanel";
 import { ChangePasswordDialog } from "@/components/ChangePasswordDialog";
 import { PrinterSetupDialog } from "@/components/PrinterSetupDialog";
@@ -252,6 +255,8 @@ export function PosClassicClient({
   const [draftBillRef] = useState(() => `POS-${Date.now()}`);
   const [, setRecentDocs] = useState<SavedDocSummary[]>([]);
   const [editingInvoiceNo, setEditingInvoiceNo] = useState<string | null>(null);
+  const [amendMode, setAmendMode] = useState<"in_place" | "copy_new" | "supersede">("in_place");
+  const [editingExistingPaidHkd, setEditingExistingPaidHkd] = useState(0);
   const [depositTargetInvoice, setDepositTargetInvoice] = useState<{
     invoiceNo: string;
     netAmountHkd: number;
@@ -260,6 +265,17 @@ export function PosClassicClient({
   } | null>(null);
   const [memberSortBy, setMemberSortBy] = useState<"newest_id" | "points">("newest_id");
   const [isDelivery, setIsDelivery] = useState(false);
+  const [deliveryDraft, setDeliveryDraft] = useState<DeliveryDraftInfo>(() => ({
+    enabled: false,
+    scheduledDate: getTodayHkt(),
+    recipientPhone: "",
+    deliveryAddress: "",
+    remarks: "",
+  }));
+  const [showDepositManagerNo, setShowDepositManagerNo] = useState<string | null>(null);
+  const [showDeliverySetupModal, setShowDeliverySetupModal] = useState(false);
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [draggedSku, setDraggedSku] = useState<string | null>(null);
   const [appliedSplits, setAppliedSplits] = useState<SplitPaymentEntry[]>([]);
   const [promoRules, setPromoRules] = useState<PromotionRule[]>([]);
   const [printerOnOff, setPrinterOnOff] = useState(false);
@@ -364,8 +380,18 @@ export function PosClassicClient({
 
   const netPayableHkd = Math.max(0, Number((totals.netAmountHkd - promoResult.billDiscountHkd).toFixed(2)));
   const splitPaidTotal = Number(appliedSplits.reduce((s, p) => s + p.amountHkd, 0).toFixed(2));
-  const effectiveDueBaseHkd = depositTargetInvoice ? depositTargetInvoice.balanceDueHkd : netPayableHkd;
+  const effectiveDueBaseHkd = depositTargetInvoice
+    ? depositTargetInvoice.balanceDueHkd
+    : editingInvoiceNo && amendMode === "in_place"
+      ? Math.max(0, Number((netPayableHkd - editingExistingPaidHkd).toFixed(2)))
+      : netPayableHkd;
   const remainingDue = Math.max(0, Number((effectiveDueBaseHkd - splitPaidTotal).toFixed(2)));
+
+  useEffect(() => {
+    setPosUnsavedWork(
+      cart.length > 0 || Boolean(editingInvoiceNo) || Boolean(depositTargetInvoice),
+    );
+  }, [cart.length, editingInvoiceNo, depositTargetInvoice]);
 
   const crm = calculateCrmPoints(
     cart.map((c, idx) => ({
@@ -824,6 +850,45 @@ export function PosClassicClient({
     setSelectedSku(cart[nextIdx]!.item.sku);
   }
 
+  function moveCartLineOrder(delta: -1 | 1) {
+    if (!selectedSku || cart.length < 2) return;
+    setCart((prev) => {
+      const idx = prev.findIndex((c) => c.item.sku === selectedSku);
+      const targetIdx = idx + delta;
+      if (idx < 0 || targetIdx < 0 || targetIdx >= prev.length) return prev;
+      const copy = [...prev];
+      const [moved] = copy.splice(idx, 1);
+      copy.splice(targetIdx, 0, moved!);
+      return copy;
+    });
+    setStatusMessage(delta < 0 ? "已上移項目次序" : "已下移項目次序");
+  }
+
+  function reorderCartByDrop(sourceSku: string, targetSku: string) {
+    if (!sourceSku || !targetSku || sourceSku === targetSku) return;
+    setCart((prev) => {
+      const fromIdx = prev.findIndex((c) => c.item.sku === sourceSku);
+      const toIdx = prev.findIndex((c) => c.item.sku === targetSku);
+      if (fromIdx < 0 || toIdx < 0) return prev;
+      const copy = [...prev];
+      const [moved] = copy.splice(fromIdx, 1);
+      copy.splice(toIdx, 0, moved!);
+      return copy;
+    });
+    setSelectedSku(sourceSku);
+    setStatusMessage("已調整項目次序");
+  }
+
+  function sortCartByCode() {
+    if (cart.length < 2) return;
+    setCart((prev) =>
+      [...prev].sort((a, b) =>
+        (a.item.ubc || a.item.sku).localeCompare(b.item.ubc || b.item.sku, undefined, { numeric: true }),
+      ),
+    );
+    setStatusMessage("已按貨碼排序貨品項目");
+  }
+
   function saveLineModalEdit() {
     if (!editingLineState) return;
     const targetLine = cart.find((c) => c.item.sku === editingLineState.sku);
@@ -864,15 +929,22 @@ export function PosClassicClient({
     setStatusMessage(`已更新項目 ${targetLine.item.sku}`);
   }
 
-  /** 送貨: toggle delivery order mode & sync note tag. */
+  /** 送貨: toggle delivery order mode & sync draft/note tag. */
   function flagDelivery() {
     setIsDelivery((prev) => {
       const next = !prev;
+      setDeliveryDraft((d) => ({
+        ...d,
+        enabled: next,
+        scheduledDate: d.scheduledDate || getTodayHkt(),
+        recipientPhone: d.recipientPhone || selectedCustomer?.phone || "",
+        deliveryAddress: d.deliveryAddress || selectedCustomer?.address || "",
+      }));
       setNotes((cur) => {
         const cleaned = cur.replace(/^送貨\s*/, "").trim();
         return next ? `送貨 ${cleaned}`.trim() : cleaned;
       });
-      setStatusMessage(next ? "此單已標記送貨（將會建立提貨單）" : "已取消送貨標記");
+      setStatusMessage(next ? "此單已標記送貨（將會建立提貨單，可按「送貨設定」改期/改地址）" : "已取消送貨標記");
       return next;
     });
   }
@@ -974,8 +1046,17 @@ export function PosClassicClient({
     setSelectedCustomer(null);
     setSelectedSalesperson(null);
     setEditingInvoiceNo(null);
+    setAmendMode("in_place");
+    setEditingExistingPaidHkd(0);
     setDepositTargetInvoice(null);
     setIsDelivery(false);
+    setDeliveryDraft({
+      enabled: false,
+      scheduledDate: getTodayHkt(),
+      recipientPhone: "",
+      deliveryAddress: "",
+      remarks: "",
+    });
     setTenderMode(false);
     setOctopusApprovedInfo(null);
     setOctopusLockCardId(null);
@@ -1002,7 +1083,7 @@ export function PosClassicClient({
     setDocType((prev) => (prev === "SALES_RETURN" ? "RETAIL_SALE" : "SALES_RETURN"));
   }
 
-  function loadQueriedBill(detail: ReceiptDetail, action: "modify" | "reorder") {
+  function loadQueriedBill(detail: ReceiptDetail, action: "modify" | "reorder" | "copy_new") {
     const isDepositTopUp =
       action === "reorder" &&
       detail.bill.balanceDueHkd > 0.005 &&
@@ -1042,7 +1123,15 @@ export function PosClassicClient({
     } else {
       setSelectedCustomer(null);
     }
-    setIsDelivery(detail.bill.deliveryStatus === "pending");
+    const hasDelivery = Boolean(detail.bill.delivery) || detail.bill.deliveryStatus === "pending";
+    setIsDelivery(hasDelivery);
+    setDeliveryDraft({
+      enabled: hasDelivery,
+      scheduledDate: detail.bill.delivery?.scheduledDate || getTodayHkt(),
+      recipientPhone: detail.bill.delivery?.recipientPhone || detail.bill.customer?.phone || "",
+      deliveryAddress: detail.bill.delivery?.deliveryAddress || detail.bill.customer?.address || "",
+      remarks: detail.bill.delivery?.remarks || "",
+    });
     setAppliedSplits([]);
     setEntryBuffer("");
     setDepositAmount("");
@@ -1055,9 +1144,11 @@ export function PosClassicClient({
         balanceDueHkd: detail.bill.balanceDueHkd,
       });
       setEditingInvoiceNo(null);
+      setAmendMode("in_place");
+      setEditingExistingPaidHkd(0);
       setTenderMode(true);
       setSelectedTender("CASH");
-      setNotes(`加訂原單 ${detail.bill.invoiceNo}`);
+      setNotes(detail.bill.notes ?? "");
       setWorkspaceMode("retail");
       setSideMenu("buttons");
       setRightPanel("quickpick");
@@ -1070,13 +1161,37 @@ export function PosClassicClient({
 
     setDepositTargetInvoice(null);
     setTenderMode(false);
-    setEditingInvoiceNo(action === "modify" ? detail.bill.invoiceNo : null);
-    setNotes(action === "modify" ? `修改原單 ${detail.bill.invoiceNo}` : `加訂原單 ${detail.bill.invoiceNo}`);
+    if (action === "modify") {
+      setEditingInvoiceNo(detail.bill.invoiceNo);
+      setAmendMode("in_place");
+      setEditingExistingPaidHkd(detail.bill.paidAmountHkd);
+      setNotes(detail.bill.notes ?? "");
+      if (detail.bill.paidAmountHkd > 0 && detail.bill.balanceDueHkd > 0.005) {
+        setSelectedTender("UNPAID_INVOICE");
+      } else {
+        setSelectedTender("CASH");
+      }
+      setStatusMessage(
+        detail.bill.paidAmountHkd > 0
+          ? `修改單據 ${detail.bill.invoiceNo}（保留原單號及已付訂金 ${formatHkd(detail.bill.paidAmountHkd)}）`
+          : `修改單據 ${detail.bill.invoiceNo}（保留原單號）`,
+      );
+    } else {
+      setEditingInvoiceNo(null);
+      setAmendMode("in_place");
+      setEditingExistingPaidHkd(0);
+      setSelectedTender("CASH");
+      setNotes(action === "copy_new" ? `分拆/複製原單 ${detail.bill.invoiceNo}` : `加訂原單 ${detail.bill.invoiceNo}`);
+      setStatusMessage(
+        action === "copy_new"
+          ? `已複製 ${detail.bill.invoiceNo} 為新單草稿`
+          : `加訂單據 ${detail.bill.invoiceNo} 已載入收銀台`,
+      );
+    }
     setWorkspaceMode("retail");
     setSideMenu("buttons");
     setRightPanel("quickpick");
     setShowBillQuery(false);
-    setStatusMessage(`${action === "modify" ? "修改" : "加訂"}單據 ${detail.bill.invoiceNo} 已載入收銀台`);
   }
 
   function addSplitPayment() {
@@ -1275,7 +1390,12 @@ export function PosClassicClient({
         });
       }
 
-      if (remainingDue > 0.005) {
+      const hasExplicitDepositEntry =
+        entryBuffer.trim() !== "" ||
+        (selectedTender === "UNPAID_INVOICE" && depositMode !== "NONE" && Number(depositAmount) > 0) ||
+        (selectedTender === "OCTOPUS" && Boolean(octopusApprovedInfo));
+
+      if (remainingDue > 0.005 && (appliedSplits.length === 0 || hasExplicitDepositEntry)) {
         if (selectedTender === "UNPAID_INVOICE") {
           const depAmt = Number(depositAmount);
           if (depositMode !== "NONE" && Number.isFinite(depAmt) && depAmt > 0) {
@@ -1431,7 +1551,7 @@ export function PosClassicClient({
       }
       if (remainingDue > 0.005) {
         if (selectedTender === "UNPAID_INVOICE") {
-          if (appliedSplits.length === 0 && depositMode !== "NONE" && Number(depositAmount) > 0) {
+          if (depositMode !== "NONE" && Number(depositAmount) > 0) {
             initialPayments.push({
               clientIdempotencyKey: `pmt-${Date.now()}`,
               tenderCode: depositMode,
@@ -1477,8 +1597,18 @@ export function PosClassicClient({
       salespersonId: selectedSalesperson?.id,
       docType: effectiveDocType,
       status: mode,
-      supersedeInvoiceNo: editingInvoiceNo ?? undefined,
+      amendInvoiceNo: editingInvoiceNo && amendMode === "in_place" ? editingInvoiceNo : undefined,
+      supersedeInvoiceNo: editingInvoiceNo && amendMode === "supersede" ? editingInvoiceNo : undefined,
       createDeliveryOrder: mode === "completed" && isDelivery,
+      deliveryInfo:
+        mode === "completed" && isDelivery
+          ? {
+              scheduledDate: deliveryDraft.scheduledDate || undefined,
+              recipientPhone: deliveryDraft.recipientPhone || undefined,
+              deliveryAddress: deliveryDraft.deliveryAddress || undefined,
+              remarks: deliveryDraft.remarks || undefined,
+            }
+          : undefined,
       customerId: selectedCustomer?.id,
       customerCurrentPoints: selectedCustomer?.pointsBalance ?? 0,
       lines: cart.map((c, idx) => ({
@@ -1551,6 +1681,15 @@ export function PosClassicClient({
       setDepositAmount("");
       setNotes("");
       setEditingInvoiceNo(null);
+      setAmendMode("in_place");
+      setEditingExistingPaidHkd(0);
+      setDeliveryDraft({
+        enabled: false,
+        scheduledDate: getTodayHkt(),
+        recipientPhone: "",
+        deliveryAddress: "",
+        remarks: "",
+      });
       setSelectedSalesperson(null);
       setEntryBuffer("");
       if (mode === "held") {
@@ -1575,15 +1714,16 @@ export function PosClassicClient({
     }
   }
 
-  async function logout() {
+  async function executeLogout() {
+    allowNextUnload();
+    setPosUnsavedWork(false);
     await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     if (authRequired) {
       router.push("/login");
       router.refresh();
       return;
     }
-    clearTillSelection();
-    setSelectedSalesperson(null);
+    cancelCurrentBill();
     setStatusMessage("開發模式已停用登入 — 已重設收銀台");
     router.push("/");
     router.refresh();
@@ -1609,9 +1749,22 @@ export function PosClassicClient({
           showHoldDialog ||
           showPayMethod2 ||
           quickMemberModal ||
-          editingLineState,
+          editingLineState ||
+          showDepositManagerNo ||
+          showDeliverySetupModal ||
+          showExitConfirm,
       );
       if (modalOpen) return;
+      if (event.altKey && event.key === "ArrowUp") {
+        event.preventDefault();
+        moveCartLineOrder(-1);
+        return;
+      }
+      if (event.altKey && event.key === "ArrowDown") {
+        event.preventDefault();
+        moveCartLineOrder(1);
+        return;
+      }
       if (event.ctrlKey && event.key.toLowerCase() === "w") {
         event.preventDefault();
         priceEnquiry();
@@ -2039,7 +2192,7 @@ export function PosClassicClient({
     >
       {/* ── 1. top toolbar ─────────────────────────────────────────────── */}
       <div className="flex items-stretch border-b border-[#aca899] bg-[#f0f0f0]">
-        <button type="button" className={toolbarBtn} onClick={() => void logout()} title="登出">
+        <button type="button" className={toolbarBtn} onClick={() => setShowExitConfirm(true)} title="登出">
           <LegacyIcon name="logout" className="h-5 w-5" />
           登出
         </button>
@@ -2368,6 +2521,36 @@ export function PosClassicClient({
                   </button>
                   <button
                     type="button"
+                    disabled={!selectedLine || cart.findIndex((c) => c.item.sku === selectedSku) <= 0}
+                    onClick={() => moveCartLineOrder(-1)}
+                    className="border border-[#aca899] bg-[#f0f0f0] px-1.5 py-1 text-[11px] hover:bg-white disabled:opacity-40"
+                    title="上移項目 (Alt+↑)"
+                  >
+                    上移
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      !selectedLine ||
+                      cart.findIndex((c) => c.item.sku === selectedSku) >= cart.length - 1
+                    }
+                    onClick={() => moveCartLineOrder(1)}
+                    className="border border-[#aca899] bg-[#f0f0f0] px-1.5 py-1 text-[11px] hover:bg-white disabled:opacity-40"
+                    title="下移項目 (Alt+↓)"
+                  >
+                    下移
+                  </button>
+                  <button
+                    type="button"
+                    disabled={cart.length < 2}
+                    onClick={sortCartByCode}
+                    className="border border-[#aca899] bg-[#f0f0f0] px-1.5 py-1 text-[11px] hover:bg-white disabled:opacity-40"
+                    title="按貨碼排序"
+                  >
+                    排序
+                  </button>
+                  <button
+                    type="button"
                     className="border border-[#aca899] bg-[#f0f0f0] px-2 py-1"
                     title="鍵盤"
                     onClick={() => {
@@ -2388,6 +2571,70 @@ export function PosClassicClient({
                     ➡️
                   </button>
                 </div>
+
+                {/* In-place Amend Mode Banner & Delivery Setup Bar */}
+                {editingInvoiceNo ? (
+                  <div
+                    data-testid="amend-mode-banner"
+                    className="flex flex-wrap items-center justify-between gap-2 border-b border-[#d4d0c8] bg-[#fff8dc] px-2 py-1 text-[11px] text-black"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-[#c00000]">修改原單：{editingInvoiceNo}</span>
+                      {editingExistingPaidHkd > 0 ? (
+                        <span className="font-mono text-[#0a7a2f]">
+                          已付訂金 {formatHkd(editingExistingPaidHkd)}（保留）
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        aria-label="修改單號模式"
+                        value={amendMode}
+                        onChange={(e) => {
+                          const next = e.target.value as "in_place" | "copy_new" | "supersede";
+                          setAmendMode(next);
+                        }}
+                        className="border border-[#7f9db9] bg-white px-1.5 py-0.5 text-[11px]"
+                      >
+                        <option value="in_place">保留原單號 (預設)</option>
+                        <option value="copy_new">另開新單 / 分拆發票 (保留原單)</option>
+                        <option value="supersede">作廢原單重開新單 (Revise)</option>
+                      </select>
+                      {editingExistingPaidHkd > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => setShowDepositManagerNo(editingInvoiceNo)}
+                          className="border border-[#0a246a] bg-[#dbeafe] px-2 py-0.5 text-[11px] font-bold text-[#0a246a] hover:bg-white"
+                        >
+                          改訂 / 取消訂
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
+                {isDelivery ? (
+                  <div
+                    data-testid="delivery-draft-bar"
+                    className="flex flex-wrap items-center justify-between gap-2 border-b border-[#d4d0c8] bg-[#e6f0fa] px-2 py-1 text-[11px] text-black"
+                  >
+                    <div className="truncate">
+                      <strong className="text-[#0a246a]">送貨設定：</strong>
+                      <span className="font-mono">{deliveryDraft.scheduledDate || getTodayHkt()}</span>
+                      {" · "}
+                      <span className="font-mono">{deliveryDraft.recipientPhone || selectedCustomer?.phone || "未填電話"}</span>
+                      {" · "}
+                      <span>{deliveryDraft.deliveryAddress || selectedCustomer?.address || "未填地址"}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowDeliverySetupModal(true)}
+                      className="shrink-0 border border-[#0a246a] bg-white px-2 py-0.5 text-[11px] font-bold text-[#0a246a] hover:bg-[#dbeafe]"
+                    >
+                      送貨設定 (改期/改地址)
+                    </button>
+                  </div>
+                ) : null}
 
                 {/* item grid — 條碼 | 貨品 | 顏色 | 尺碼 | 數量 | 單價 | % | 價錢 */}
                 <div className="min-h-0 flex-1 overflow-auto bg-[#dfe7f0]">
@@ -2411,6 +2658,13 @@ export function PosClassicClient({
                         return (
                           <tr
                             key={line.item.sku}
+                            draggable
+                            onDragStart={() => setDraggedSku(line.item.sku)}
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={() => {
+                              if (draggedSku) reorderCartByDrop(draggedSku, line.item.sku);
+                              setDraggedSku(null);
+                            }}
                             onClick={() => setSelectedSku(active ? null : line.item.sku)}
                             onDoubleClick={() =>
                               setEditingLineState({
@@ -2422,7 +2676,7 @@ export function PosClassicClient({
                                 serialNo: line.serialNo ?? "",
                               })
                             }
-                            title={`雙擊修改數量 / 單價 / 折扣 / 備註 / 序號（條碼: ${line.item.sku}）`}
+                            title={`拖曳或按上移/下移調動次序；雙擊修改數量/單價/折扣/備註/序號（條碼: ${line.item.sku}）`}
                             className={`cursor-pointer ${active ? "bg-[#316ac5] text-white" : idx % 2 ? "bg-[#e9eff6]" : "bg-[#dfe7f0]"}`}
                           >
                             <td className="px-2 py-1 font-mono" title={`條碼: ${line.item.sku}`}>
@@ -2578,17 +2832,55 @@ export function PosClassicClient({
                       <button
                         type="button"
                         onClick={() => {
+                          const rawAmt = entryBuffer.trim() ? Number(entryBuffer) : 0;
+                          if (rawAmt > 0 && rawAmt <= remainingDue) {
+                            const depTender = (selectedTender === "UNPAID_INVOICE" ? "CASH" : selectedTender) as TenderCode;
+                            if (depTender === "OCTOPUS" && !octopusApprovedInfo) {
+                              showLegacyMsg("101");
+                              return;
+                            }
+                            setAppliedSplits((prev) => [
+                              ...prev,
+                              {
+                                id: `sp-${Date.now()}-${prev.length}`,
+                                tenderCode: depTender,
+                                amountHkd: Number(rawAmt.toFixed(2)),
+                                approvalCode: approvalCode.trim() || undefined,
+                                cardLast4: cardLast4.length === 4 ? cardLast4 : undefined,
+                                remarks: "Deposit payment",
+                              },
+                            ]);
+                            setEntryBuffer("");
+                            setApprovalCode("");
+                            setCardLast4("");
+                            setSelectedTender("UNPAID_INVOICE");
+                            setStatusMessage(`已加入訂金 ${depTender} ${formatHkd(rawAmt)}（其餘尚欠保留作落訂）`);
+                            return;
+                          }
                           setSelectedTender("UNPAID_INVOICE");
                           if (depositMode === "NONE") setDepositMode("CASH");
                         }}
                         className={`border border-[#7f9db9] px-2 py-0.5 text-[11px] text-black ${
-                          selectedTender === "UNPAID_INVOICE" && depositMode !== "NONE"
+                          selectedTender === "UNPAID_INVOICE" && (depositMode !== "NONE" || appliedSplits.length > 0)
                             ? "bg-[#316ac5] font-bold text-white"
                             : "bg-[#f0f0f0] hover:bg-[#e5e1d5]"
                         }`}
                       >
                         落訂
                       </button>
+                      {(depositTargetInvoice || (editingInvoiceNo && editingExistingPaidHkd > 0)) ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setShowDepositManagerNo(
+                              depositTargetInvoice?.invoiceNo ?? editingInvoiceNo!,
+                            )
+                          }
+                          className="border border-[#8b0000] bg-[#fff0f0] px-2 py-0.5 text-[11px] font-bold text-[#8b0000] hover:bg-white"
+                        >
+                          改訂 / 取消訂
+                        </button>
+                      ) : null}
                     </div>
                     <div className="flex flex-wrap items-stretch gap-1">
                       {TENDERS.map((t) => (
@@ -3551,11 +3843,17 @@ export function PosClassicClient({
                 onClick={() => {
                   setAppliedSplits([]);
                   setShowPayMethod2(false);
-                  setStatusMessage("已取消付款 2");
+                  if (depositTargetInvoice || (editingInvoiceNo && editingExistingPaidHkd > 0)) {
+                    setShowDepositManagerNo(depositTargetInvoice?.invoiceNo ?? editingInvoiceNo!);
+                  } else {
+                    setStatusMessage("已取消付款 2");
+                  }
                 }}
                 className="border border-[#7f9db9] bg-[#fff0f0] px-4 py-1 text-[#900]"
               >
-                取消付款2
+                {depositTargetInvoice || (editingInvoiceNo && editingExistingPaidHkd > 0)
+                  ? "取消付款2 / 改已付訂金"
+                  : "取消付款2"}
               </button>
               <button
                 type="button"
@@ -3755,6 +4053,89 @@ export function PosClassicClient({
                 onClick={() => setShowAbout(false)}
               >
                 離開
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showDepositManagerNo ? (
+        <DepositPaymentDialog
+          invoiceNo={showDepositManagerNo}
+          onClose={() => setShowDepositManagerNo(null)}
+          onUpdated={(next) => {
+            if (depositTargetInvoice?.invoiceNo === next.bill.invoiceNo) {
+              setDepositTargetInvoice({
+                invoiceNo: next.bill.invoiceNo,
+                netAmountHkd: next.bill.netAmountHkd,
+                alreadyPaidHkd: next.bill.paidAmountHkd,
+                balanceDueHkd: next.bill.balanceDueHkd,
+              });
+            }
+            if (editingInvoiceNo === next.bill.invoiceNo) {
+              setEditingExistingPaidHkd(next.bill.paidAmountHkd);
+            }
+          }}
+        />
+      ) : null}
+
+      {showDeliverySetupModal ? (
+        <DeliverySetupDialog
+          initialInfo={{
+            ...deliveryDraft,
+            enabled: isDelivery,
+          }}
+          customerPhone={selectedCustomer?.phone}
+          customerAddress={selectedCustomer?.address}
+          onClose={() => setShowDeliverySetupModal(false)}
+          onSaved={(next) => {
+            setIsDelivery(next.enabled);
+            setDeliveryDraft(next);
+            setShowDeliverySetupModal(false);
+            setStatusMessage(
+              next.enabled
+                ? `已設定送貨：${next.scheduledDate} ${next.recipientPhone}`.trim()
+                : "已轉為自取",
+            );
+          }}
+        />
+      ) : null}
+
+      {showExitConfirm ? (
+        <div
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/30"
+          role="dialog"
+          aria-modal="true"
+          aria-label="確定離開"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") e.preventDefault();
+          }}
+        >
+          <div className="w-[380px] border-2 border-[#0a246a] bg-[#ece9d8] text-xs text-black shadow-2xl">
+            <div className="bg-[#0a246a] px-3 py-1 font-bold text-white">確定離開</div>
+            <div className="p-4 text-[13px]">
+              {cart.length > 0 || editingInvoiceNo || depositTargetInvoice
+                ? "目前仍有未儲存的開單／修改資料，確定要離開並重設收銀台嗎？"
+                : "確定要離開收銀介面嗎？"}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-[#aca899] p-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExitConfirm(false);
+                  void executeLogout();
+                }}
+                className="border border-[#808080] bg-[#ece9d8] px-4 py-1 font-bold text-[#c00000] hover:bg-white"
+              >
+                確定離開
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setShowExitConfirm(false)}
+                className="border border-[#808080] bg-[#e1dfff] px-4 py-1 font-bold hover:bg-white"
+              >
+                取消
               </button>
             </div>
           </div>

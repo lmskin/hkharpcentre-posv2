@@ -1250,6 +1250,7 @@ export async function listBillQuery(
       customerNameZh: customers.nameZh,
       customerNameEn: customers.nameEn,
       deliveryStatus: deliveryOrders.deliveryStatus,
+      scheduledDate: deliveryOrders.scheduledDate,
       legacyOrl: deliveryOrders.legacyOrl,
       deliveryRemarks: deliveryOrders.remarks,
     })
@@ -1301,6 +1302,7 @@ export async function listBillQuery(
       balanceDueHkd: Number(row.balanceDue),
       issuedAtIso: row.issuedAt.toISOString(),
       deliveryStatus: row.deliveryStatus,
+      scheduledDate: row.scheduledDate ? formatHktBusinessDate(row.scheduledDate) : null,
       legacyOrl: row.legacyOrl ?? "",
       deliveryRemarks: row.deliveryRemarks ?? "",
       legacySc: row.legacySc ?? "",
@@ -1537,10 +1539,24 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
       .where(eq(billLines.billId, bill.id))
       .orderBy(billLines.lineNo),
     conn.db
-      .select()
+      .select({
+        id: billPayments.id,
+        tenderCode: billPayments.tenderCode,
+        payMethodNameZh: payMethods.nameZh,
+        legacyPm: payMethods.legacyPm,
+        amount: billPayments.amount,
+        paidAt: billPayments.paidAt,
+        staffName: staff.displayName,
+        approvalCode: billPayments.approvalCode,
+        cardLast4: billPayments.cardLast4,
+        referenceNo: billPayments.referenceNo,
+        remarks: billPayments.remarks,
+      })
       .from(billPayments)
+      .leftJoin(payMethods, eq(payMethods.id, billPayments.payMethodId))
+      .leftJoin(staff, eq(staff.id, billPayments.staffId))
       .where(and(eq(billPayments.billId, bill.id), eq(billPayments.voided, false)))
-      .orderBy(billPayments.paidAt),
+      .orderBy(billPayments.paidAt, billPayments.id),
     getAppSettings(),
     conn.db.select().from(deliveryOrders).where(eq(deliveryOrders.billId, bill.id)).limit(1),
   ]);
@@ -1561,6 +1577,17 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
       paidAtIso: bill.paidAt?.toISOString(),
       notes: bill.notes,
       deliveryStatus: deliveries[0]?.deliveryStatus ?? null,
+      delivery: deliveries[0]
+        ? {
+            deliveryStatus: deliveries[0].deliveryStatus,
+            scheduledDate: deliveries[0].scheduledDate
+              ? formatHktBusinessDate(deliveries[0].scheduledDate)
+              : null,
+            recipientPhone: deliveries[0].recipientPhone ?? "",
+            deliveryAddress: deliveries[0].deliveryAddress ?? "",
+            remarks: deliveries[0].remarks ?? "",
+          }
+        : null,
       customer: bill.customerLegacyId
         ? {
             id: bill.customerId!,
@@ -1592,12 +1619,17 @@ export async function getInvoiceDetailByNo(invoiceNo: string) {
       serialNo: l.serialNo ?? "",
     })),
     payments: pmts.map((p) => ({
+      id: p.id,
       tenderCode: p.tenderCode,
+      payMethodNameZh: p.payMethodNameZh ?? p.tenderCode,
+      legacyPm: p.legacyPm ?? null,
       amountHkd: Number(p.amount),
       paidAtIso: p.paidAt.toISOString(),
+      staffName: p.staffName ?? "",
       approvalCode: p.approvalCode,
       cardLast4: p.cardLast4,
       referenceNo: p.referenceNo,
+      remarks: p.remarks ?? "",
     })),
     settings,
   };

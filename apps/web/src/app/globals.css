@@ -54,4 +54,22 @@ body {
   .legacy-report-table tr {
     break-inside: avoid;
   }
+
+  /* When printing from 查單 dialog, print ONLY the isolated receipt/delivery sheet */
+  body:has(#bill-query-print-sheet) {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  body:has(#bill-query-print-sheet) > *:not(#bill-query-print-sheet) {
+    display: none !important;
+  }
+
+  #bill-query-print-sheet {
+    display: block !important;
+    width: 100% !important;
+    padding: 4mm 0 !important;
+    background: #ffffff !important;
+  }
 }

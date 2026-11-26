@@ -3,8 +3,17 @@ import type { Connection } from "mysql2/promise";
 import { captureDbSnapshot, openE2eMysqlConnection, restoreDbSnapshot, type DbSnapshot } from "./helpers/cleanup";
 
 const BRIDGE_URL = "http://127.0.0.1:17889";
+const unloadHandledPages = new WeakSet<Page>();
 
 async function openCashierHome(page: Page) {
+  if (!unloadHandledPages.has(page)) {
+    unloadHandledPages.add(page);
+    page.on("dialog", (dialog) => {
+      if (dialog.type() === "beforeunload") {
+        void dialog.accept();
+      }
+    });
+  }
   await page.goto("/");
   await expect(page.getByPlaceholder("條碼", { exact: true })).toBeVisible();
 }
@@ -1189,5 +1198,152 @@ test.describe("UI Workflows: Classic POS, AR Invoices & Back Office (Real Chrome
     await expect(page.getByText("SN-HARP-888")).toBeVisible();
     await expect(page.getByText("Dec 2026 租琴")).toBeVisible();
     await expect(page.getByText("Room 2016, United Centre, Admiralty")).toBeVisible();
+  });
+
+  test("UI 13: Reviewer 20261126 — Close Confirm, 3-Step Deposit + Edit/Cancel Deposit, In-Place Amend Keeping Deposit & Invoice No, Delivery Date/Addr, Print Sheet & Item Reorder", async ({
+    page,
+  }) => {
+    await openCashierHome(page);
+
+    // 1. Add 2 items and test cart item reordering (上移 / 下移)
+    await enterBarcodeOnPos(page, "HCSNG001"); // $70.00
+    const cartRows = page.locator("table").first().locator("tbody tr");
+    await expect(cartRows.nth(0)).toContainText("HCSNG001");
+    await enterBarcodeOnPos(page, "210810");   // $113.00
+    await expect(cartRows.nth(0)).toContainText("HCSNG001");
+    await expect(cartRows.nth(1)).toContainText("210810");
+
+    // 210810 is selected; click 上移 -> moves to row 0
+    await page.locator('button[title="上移項目 (Alt+↑)"]').click();
+    await expect(cartRows.nth(0)).toContainText("210810");
+    await expect(cartRows.nth(1)).toContainText("HCSNG001");
+
+    // 2. Close confirmation prompt on 登出 & global beforeunload handler when unsaved work is in cart
+    const beforeUnloadPrevented = await page.evaluate(() => {
+      const ev = new Event("beforeunload", { cancelable: true });
+      return !window.dispatchEvent(ev);
+    });
+    expect(beforeUnloadPrevented).toBe(true);
+
+    await page.locator('button[title="登出"]').click();
+    const exitDlg = page.getByRole("dialog", { name: "確定離開" });
+    await expect(exitDlg).toBeVisible();
+    await exitDlg.getByRole("button", { name: "取消", exact: true }).click();
+    await expect(exitDlg).not.toBeVisible();
+    await expect(cartRows.nth(0)).toContainText("210810");
+
+    // Remove 210810 so cart only has HCSNG001 ($70) for $40 + $20 + $10 deposit test
+    await page.getByRole("button", { name: "取消項目" }).click();
+    await expect(cartRows).toHaveCount(1);
+
+    // 3. First deposit $40 via keypad + 落訂 button -> 完成
+    await page.getByRole("button", { name: /方法/ }).click();
+    await page.getByTestId("keypad-lcd").fill("40");
+    await page.getByRole("button", { name: "落訂", exact: true }).click();
+    await expect(page.getByText(/尚欠餘額：\s*HK\$30\.00/).first()).toBeVisible();
+    await page.locator('button[title="完成"]').click();
+
+    const okDlg = page.getByRole("dialog", { name: "營運通訊息 - 000" });
+    await expect(okDlg).toBeVisible();
+    const firstDlgText = await okDlg.innerText();
+    const invMatch = firstDlgText.match(/INV-\d+-\d+/);
+    expect(invMatch).not.toBeNull();
+    const invoiceNo = invMatch![0];
+    await expect(okDlg).toContainText("PARTIAL");
+    await expect(okDlg).toContainText("HK$30.00");
+    await okDlg.getByRole("button", { name: "離開" }).click();
+
+    // 4. Second partial deposit $20 via 加訂 + 加入部分付款 (付款二) -> leaves $10 remaining (NOT full paid!)
+    await page.locator('button[title="查單"]').first().click();
+    const qDlg = page.getByRole("dialog", { name: "查單" });
+    await expect(qDlg).toBeVisible();
+    await qDlg.locator("tbody tr", { hasText: invoiceNo }).first().click();
+    await qDlg.getByRole("button", { name: "加訂/提貨", exact: true }).click();
+    await qDlg.getByRole("button", { name: "加訂 / 續付尾數", exact: true }).click();
+
+    await page.getByTestId("keypad-lcd").fill("20");
+    await page.getByRole("button", { name: "加入部分付款 (付款二)" }).click();
+    await expect(page.getByText(/尚欠餘額：\s*HK\$10\.00/).first()).toBeVisible();
+    await page.locator('button[title="完成"]').click();
+    await expect(okDlg).toBeVisible();
+    await expect(okDlg).toContainText(invoiceNo);
+    await expect(okDlg).toContainText("PARTIAL");
+    await expect(okDlg).toContainText("HK$10.00");
+    await okDlg.getByRole("button", { name: "離開" }).click();
+
+    // 5. Open DepositPaymentDialog from 查單 -> test 改訂 (Bank Transfer $15) + 尾數付款 + 取消訂
+    await page.locator('button[title="查單"]').first().click();
+    await expect(qDlg).toBeVisible();
+    await qDlg.locator("tbody tr", { hasText: invoiceNo }).first().click();
+    await qDlg.getByRole("button", { name: "加訂/提貨", exact: true }).click();
+    await qDlg.getByRole("button", { name: "落訂 / 改訂 / 取消訂", exact: true }).click();
+
+    const depDlg = page.getByRole("dialog", { name: "付款 / 落訂管理" });
+    await expect(depDlg).toBeVisible();
+    await expect(depDlg.getByTestId("deposit-dlg-paid")).toHaveText("HK$60.00");
+    await expect(depDlg.getByTestId("deposit-dlg-balance")).toHaveText("HK$10.00");
+
+    // Edit 2nd payment ($20) -> Bank Transfer $15
+    await depDlg.locator("tbody tr").nth(1).click();
+    await depDlg.getByRole("button", { name: "改訂", exact: true }).click();
+    await depDlg.getByRole("button", { name: "Bank Transfer", exact: true }).click();
+    await depDlg.locator('input[name="depositEditAmount"]').fill("15");
+    await depDlg.locator('input[name="depositEditRemarks"]').fill("paid on 26/11");
+    await depDlg.getByRole("button", { name: "儲存改訂" }).click();
+    await expect(depDlg.getByTestId("deposit-dlg-paid")).toHaveText("HK$55.00");
+    await expect(depDlg.getByTestId("deposit-dlg-balance")).toHaveText("HK$15.00");
+
+    // Add remaining $15 via 尾數付款, then cancel that last payment via 取消訂 -> back to Paid $55 / Balance $15
+    await depDlg.getByRole("button", { name: "尾數付款" }).click();
+    await expect(depDlg.getByTestId("deposit-dlg-paid")).toHaveText("HK$70.00");
+    await expect(depDlg.getByTestId("deposit-dlg-balance")).toHaveText("HK$0.00");
+
+    await depDlg.locator("tbody tr").nth(2).click();
+    await depDlg.getByRole("button", { name: "取消訂", exact: true }).click();
+    await expect(depDlg.getByTestId("deposit-dlg-paid")).toHaveText("HK$55.00");
+    await expect(depDlg.getByTestId("deposit-dlg-balance")).toHaveText("HK$15.00");
+    await depDlg.getByRole("button", { name: "離開" }).click();
+
+    // 6. Modify same invoice in-place (保留原單號 & 保留已付訂金) + add item + set delivery date/phone/address
+    await qDlg.getByRole("button", { name: "修改", exact: true }).click();
+    await expect(page.getByTestId("amend-mode-banner")).toContainText(invoiceNo);
+    await expect(page.getByTestId("amend-mode-banner")).toContainText("HK$55.00");
+
+    await enterBarcodeOnPos(page, "210810"); // New net total $183, paid $55 -> balance $128
+    await page.getByRole("button", { name: /送貨/ }).first().click();
+    await page.getByRole("button", { name: "送貨設定 (改期/改地址)" }).click();
+    const dlyDlg = page.getByRole("dialog", { name: "送貨設定" });
+    await expect(dlyDlg).toBeVisible();
+    await dlyDlg.locator('input[name="deliveryScheduledDate"]').fill("2026-12-05");
+    await dlyDlg.locator('input[name="deliveryRecipientPhone"]').fill("91234567");
+    await dlyDlg.locator('textarea[name="deliveryAddress"]').fill("Flat D, 2/F, Kennedy Court\nHong Kong");
+    await dlyDlg.locator('input[name="deliveryRemarks"]').fill("Call 30 mins before");
+    await dlyDlg.getByRole("button", { name: "儲存送貨設定" }).click();
+    await expect(dlyDlg).not.toBeVisible();
+
+    await page.locator('button[title="完成"]').click();
+    await expect(okDlg).toBeVisible();
+    await expect(okDlg).toContainText(invoiceNo); // SAME invoiceNo preserved!
+    await expect(okDlg).toContainText("PARTIAL");
+    await expect(okDlg).toContainText("HK$128.00"); // $55 deposit preserved!
+    await okDlg.getByRole("button", { name: "離開" }).click();
+
+    // 7. Verify isolated print portal #bill-query-print-sheet in 查單 + Delivery Note tab on /print
+    await page.locator('button[title="查單"]').first().click();
+    await expect(qDlg).toBeVisible();
+    await qDlg.getByRole("button", { name: "未處理單" }).click();
+    await qDlg.locator("tbody tr", { hasText: invoiceNo }).first().click();
+    const printPortal = page.locator("#bill-query-print-sheet");
+    await expect(printPortal).toContainText(invoiceNo);
+    await expect(printPortal).toContainText("2026-12-05");
+    await expect(printPortal).toContainText("91234567");
+    await expect(printPortal).toContainText("Flat D, 2/F, Kennedy Court");
+    await qDlg.getByRole("button", { name: "離開", exact: true }).click();
+
+    await page.goto(`/invoices/${encodeURIComponent(invoiceNo)}/print`);
+    await page.getByRole("button", { name: "Delivery Note (送貨單)" }).click();
+    await expect(page.getByText("2026/12/05")).toBeVisible();
+    await expect(page.getByText("91234567")).toBeVisible();
+    await expect(page.getByText("Flat D, 2/F, Kennedy Court")).toBeVisible();
   });
 });

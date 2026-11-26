@@ -2,15 +2,31 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { formatHkd } from "@hkharp/domain/money";
 import { PrintButton } from "@/components/PrintButton";
 import { ReceiptPreview, type ReceiptDetail } from "@/components/ReceiptPreview";
+import { DeliverySetupDialog, getTodayHkt } from "@/components/DeliverySetupDialog";
 
-export function PrintableDocumentView({ detail }: { detail: ReceiptDetail }) {
-  const [format, setFormat] = useState<"a4" | "a5_harp" | "thermal">("a4");
+export function PrintableDocumentView({ detail: initialDetail }: { detail: ReceiptDetail }) {
+  const router = useRouter();
+  const [detail, setDetail] = useState<ReceiptDetail>(initialDetail);
+  const [format, setFormat] = useState<"a4" | "a5_harp" | "thermal" | "delivery">("a4");
+  const [showDeliveryDlg, setShowDeliveryDlg] = useState(false);
   const { bill, lines, payments, settings } = detail;
   const shopProfile = (settings.shop_profile ?? {}) as Record<string, string>;
   const bankInfo = (settings.invoice_payment_instructions ?? {}) as Record<string, string>;
+  const dlyDate = bill.delivery?.scheduledDate || bill.businessDate;
+  const dlyPhone = bill.delivery?.recipientPhone || bill.customer?.phone || "";
+  const dlyAddress = bill.delivery?.deliveryAddress || bill.customer?.address || "";
+
+  async function reloadDetail() {
+    const res = await fetch(`/api/bills/${encodeURIComponent(bill.invoiceNo)}`);
+    if (res.ok) {
+      setDetail((await res.json()) as ReceiptDetail);
+    }
+    router.refresh();
+  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 rounded-xl border border-slate-200 bg-white p-8 shadow-xs print:border-0 print:p-0 print:shadow-none">
@@ -18,7 +34,7 @@ export function PrintableDocumentView({ detail }: { detail: ReceiptDetail }) {
         <Link href="/invoices" className="text-xs font-medium text-indigo-600 hover:underline">
           ← Back to Invoices &amp; AR
         </Link>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="inline-flex rounded-lg border border-slate-300 bg-slate-50 p-0.5 text-xs">
             <button
               type="button"
@@ -47,12 +63,100 @@ export function PrintableDocumentView({ detail }: { detail: ReceiptDetail }) {
             >
               80mm Thermal Receipt
             </button>
+            <button
+              type="button"
+              onClick={() => setFormat("delivery")}
+              className={`rounded-md px-3 py-1 font-medium ${
+                format === "delivery" ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              Delivery Note (送貨單)
+            </button>
           </div>
+          <button
+            type="button"
+            onClick={() => setShowDeliveryDlg(true)}
+            className="rounded-lg border border-slate-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100"
+          >
+            編輯送貨日期/地址
+          </button>
           <PrintButton />
         </div>
       </div>
 
-      {format === "thermal" ? (
+      {format === "delivery" ? (
+        <div
+          className="mx-auto w-[148mm] min-h-[210mm] border border-slate-300 bg-white p-6 text-[10pt] leading-snug text-black print:border-0"
+          style={{ fontFamily: "'Times New Roman', serif" }}
+        >
+          <div className="text-center text-[24pt] font-normal leading-tight">Delivery Note</div>
+          <div className="mt-4 flex justify-end text-[10pt]">
+            <div className="space-y-0.5">
+              <div><span className="inline-block w-20 font-bold">Bill No.:</span>{bill.invoiceNo}</div>
+              <div><span className="inline-block w-20 font-bold">Date:</span>{bill.issuedAtIso.slice(0, 10).replaceAll("-", "/")}</div>
+            </div>
+          </div>
+
+          <div className="my-3 border-t border-dashed border-black" />
+
+          <table className="w-full border-collapse text-[10pt]">
+            <thead>
+              <tr className="border-b border-black text-left font-bold">
+                <th className="w-24 py-1">Prod Code</th>
+                <th className="py-1">Item Description</th>
+                <th className="py-1 text-right">Unit Price</th>
+                <th className="py-1 text-right">Qty</th>
+                <th className="py-1 text-right">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines
+                .filter((l) => !l.cancelled && l.dk > 0)
+                .map((l) => (
+                  <tr key={l.lineNo} className="align-top border-b border-slate-200">
+                    <td className="py-1.5 font-mono text-[9.5pt]">{l.ubc || l.sku}</td>
+                    <td className="py-1.5">
+                      <div>{l.nameEn || l.nameZh}</div>
+                      {l.colorName ? <div>{l.colorName}</div> : null}
+                      {l.notes ? <div className="whitespace-pre-wrap">{l.notes}</div> : null}
+                      <div>S/N : {l.serialNo || ""}</div>
+                    </td>
+                    <td className="py-1.5 text-right">-</td>
+                    <td className="py-1.5 text-right font-mono">{l.quantity}</td>
+                    <td className="py-1.5 text-right">-</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+
+          <div className="mt-6 space-y-1 text-[10pt]">
+            <div className="font-bold uppercase tracking-wide">DELIVERY REF:</div>
+            <div className="grid grid-cols-[110px_1fr] gap-y-1">
+              <span className="font-bold">Sales Memo:</span>
+              <span className="font-mono">{bill.invoiceNo}</span>
+              <span className="font-bold">Dly Date:</span>
+              <span className="font-mono">{dlyDate.replaceAll("-", "/")}</span>
+              <span className="font-bold">Tel:</span>
+              <span className="font-mono">{dlyPhone || "-"}</span>
+              <span className="font-bold">Addr:</span>
+              <span className="whitespace-pre-wrap">{dlyAddress || "-"}</span>
+              {bill.delivery?.remarks ? (
+                <>
+                  <span className="font-bold">Remarks:</span>
+                  <span className="whitespace-pre-wrap">{bill.delivery.remarks}</span>
+                </>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-12 border-t border-black pt-3 text-[9.5pt]">
+            <div className="flex justify-between">
+              <span>Customer Signature / 客戶簽收：________________________</span>
+              <span>Date / 日期：____________</span>
+            </div>
+          </div>
+        </div>
+      ) : format === "thermal" ? (
         <div className="rounded-lg bg-slate-100 p-4 print:bg-white print:p-0">
           <ReceiptPreview detail={detail} />
         </div>
@@ -274,6 +378,26 @@ export function PrintableDocumentView({ detail }: { detail: ReceiptDetail }) {
           </div>
         </>
       )}
+
+      {showDeliveryDlg ? (
+        <DeliverySetupDialog
+          invoiceNo={bill.invoiceNo}
+          initialInfo={{
+            enabled: true,
+            scheduledDate: bill.delivery?.scheduledDate || getTodayHkt(),
+            recipientPhone: dlyPhone,
+            deliveryAddress: dlyAddress,
+            remarks: bill.delivery?.remarks || "",
+          }}
+          customerPhone={bill.customer?.phone}
+          customerAddress={bill.customer?.address}
+          onClose={() => setShowDeliveryDlg(false)}
+          onSaved={() => {
+            setShowDeliveryDlg(false);
+            void reloadDetail();
+          }}
+        />
+      ) : null}
     </div>
   );
 }

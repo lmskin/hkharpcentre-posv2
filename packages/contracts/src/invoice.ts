@@ -51,6 +51,14 @@ export const BillLineInputSchema = z.object({
 });
 export type BillLineInput = z.infer<typeof BillLineInputSchema>;
 
+export const DeliveryInfoInputSchema = z.object({
+  scheduledDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  recipientPhone: z.string().max(60).optional(),
+  deliveryAddress: z.string().max(500).optional(),
+  remarks: z.string().max(255).optional(),
+});
+export type DeliveryInfoInput = z.infer<typeof DeliveryInfoInputSchema>;
+
 /**
  * Supports both immediate POS checkout AND "Issue Invoice first -> Customer pays later by Bank Transfer".
  * When initialPayments is empty (or < netAmount), the invoice is created with paymentStatus = 'unpaid' | 'partial'
@@ -62,8 +70,10 @@ export const IssueBillOrInvoiceInputSchema = z.object({
   terminalId: z.number().int().positive().optional(),
   docType: BillDocTypeSchema,
   status: z.enum(["completed", "held"]).default("completed"),
+  amendInvoiceNo: z.string().trim().min(1).max(40).optional(),
   supersedeInvoiceNo: z.string().trim().min(1).max(40).optional(),
   createDeliveryOrder: z.boolean().default(false),
+  deliveryInfo: DeliveryInfoInputSchema.optional(),
   businessDateOverride: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   salespersonId: z.number().int().positive().optional(),
   customerId: z.number().int().positive().optional(),

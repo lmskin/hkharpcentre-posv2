@@ -17,6 +17,13 @@ export interface ReceiptDetail {
     paidAtIso?: string;
     notes: string | null;
     deliveryStatus: string | null;
+    delivery?: {
+      deliveryStatus: string;
+      scheduledDate: string | null;
+      recipientPhone: string;
+      deliveryAddress: string;
+      remarks: string;
+    } | null;
     customer: {
       id?: number;
       legacyId: string;
@@ -46,12 +53,17 @@ export interface ReceiptDetail {
     serialNo?: string;
   }>;
   payments: Array<{
+    id?: number;
     tenderCode: string;
+    payMethodNameZh?: string;
+    legacyPm?: number | null;
     amountHkd: number;
     paidAtIso: string;
+    staffName?: string;
     approvalCode: string | null;
     cardLast4: string | null;
     referenceNo: string | null;
+    remarks?: string;
   }>;
   settings: Record<string, Record<string, unknown>>;
 }
@@ -155,16 +167,23 @@ export function ReceiptPreview({
         <div className="mt-3 border-t border-dashed border-black pt-2 text-[10px]">
           <div className="font-bold">送貨資料：</div>
           <div>銷售單號：{bill.invoiceNo}</div>
-          <div>送貨日期：{bill.businessDate}</div>
-          {bill.customer?.phone ? <div>電話：{bill.customer.phone}</div> : null}
-          {bill.customer?.address ? <div>地址：{bill.customer.address}</div> : null}
+          <div>送貨日期：{bill.delivery?.scheduledDate || bill.businessDate}</div>
+          {(bill.delivery?.recipientPhone || bill.customer?.phone) ? (
+            <div>電話：{bill.delivery?.recipientPhone || bill.customer?.phone}</div>
+          ) : null}
+          {(bill.delivery?.deliveryAddress || bill.customer?.address) ? (
+            <div className="whitespace-pre-wrap">
+              地址：{bill.delivery?.deliveryAddress || bill.customer?.address}
+            </div>
+          ) : null}
+          {bill.delivery?.remarks ? <div>送貨備註：{bill.delivery.remarks}</div> : null}
           <div>
             提貨狀態：
-            {bill.deliveryStatus === "delivered"
+            {(bill.delivery?.deliveryStatus ?? bill.deliveryStatus) === "delivered"
               ? "已提貨"
-              : bill.deliveryStatus === "rejected"
+              : (bill.delivery?.deliveryStatus ?? bill.deliveryStatus) === "rejected"
                 ? "已拒收"
-                : bill.deliveryStatus === "problem"
+                : (bill.delivery?.deliveryStatus ?? bill.deliveryStatus) === "problem"
                   ? "問題單"
                   : "待提貨"}
           </div>

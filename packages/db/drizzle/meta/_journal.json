@@ -15,6 +15,13 @@
       "when": 1795622142231,
       "tag": "0001_fat_dracula",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1795709520440,
+      "tag": "0002_lean_omega_flight",
+      "breakpoints": true
     }
   ]
 }
